@@ -1,4 +1,8 @@
 import { createRequire } from "node:module";
+import { createServer } from "http";
+import { Http2ServerRequest, constants } from "http2";
+import { Readable } from "stream";
+import crypto$1 from "crypto";
 import fs, { readdirSync } from "node:fs";
 import path, { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,67 +42,503 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 }) : target, mod));
 var __toCommonJS = (mod) => __hasOwnProp$2.call(mod, "module.exports") ? mod["module.exports"] : __copyProps$1(__defProp$2({}, "__esModule", { value: true }), mod);
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
-var encodeBase64$1 = (buf) => {
-	let binary$1 = "";
-	const bytes = new Uint8Array(buf);
-	for (let i = 0, len = bytes.length; i < len; i++) binary$1 += String.fromCharCode(bytes[i]);
-	return btoa(binary$1);
-};
-var decodeBase64$1 = (str) => {
-	const binary$1 = atob(str);
-	const bytes = new Uint8Array(new ArrayBuffer(binary$1.length));
-	const half = binary$1.length / 2;
-	for (let i = 0, j = binary$1.length - 1; i <= half; i++, j--) {
-		bytes[i] = binary$1.charCodeAt(i);
-		bytes[j] = binary$1.charCodeAt(j);
+var RequestError = class extends Error {
+	constructor(message$1, options) {
+		super(message$1, options);
+		this.name = "RequestError";
 	}
-	return bytes;
 };
-var parseEvent = (event) => {
-	return JSON.parse(event.toString("utf-8"));
+var toRequestError = (e) => {
+	if (e instanceof RequestError) return e;
+	return new RequestError(e.message, { cause: e });
 };
-const handle = (app$1) => {
-	return async (eventRaw, context) => {
-		const event = parseEvent(eventRaw);
-		const req = createRequest(event);
-		return createResponse(await app$1.fetch(req, {
-			event,
-			context
-		}));
-	};
+var GlobalRequest = global.Request;
+var Request$2 = class extends GlobalRequest {
+	constructor(input, options) {
+		if (typeof input === "object" && getRequestCache in input) input = input[getRequestCache]();
+		if (typeof options?.body?.getReader !== "undefined") options.duplex ??= "half";
+		super(input, options);
+	}
 };
-const createRequest = (event) => {
-	const url$1 = new URL(`https://${event.requestContext.domainName}${event.rawPath}`);
-	url$1.search = new URLSearchParams(event.queryParameters).toString();
-	const requestInit = {
-		headers: new Headers(event.headers),
-		method: event.requestContext.http.method
-	};
-	if (event.body) requestInit.body = event.isBase64Encoded ? decodeBase64$1(event.body) : event.body;
-	return new Request(url$1, requestInit);
+var newHeadersFromIncoming = (incoming) => {
+	const headerRecord = [];
+	const rawHeaders = incoming.rawHeaders;
+	for (let i = 0; i < rawHeaders.length; i += 2) {
+		const { [i]: key, [i + 1]: value } = rawHeaders;
+		if (key.charCodeAt(0) !== 58) headerRecord.push([key, value]);
+	}
+	return new Headers(headerRecord);
 };
-const createResponse = async (res) => {
-	const contentType = res.headers.get("content-type");
-	let isBase64Encoded = contentType && isContentTypeBinary(contentType) ? true : false;
-	if (!isBase64Encoded) isBase64Encoded = isContentEncodingBinary(res.headers.get("content-encoding"));
-	const body = isBase64Encoded ? encodeBase64$1(await res.arrayBuffer()) : await res.text();
-	const headers = {};
-	res.headers.forEach((value, key) => {
-		headers[key] = value;
-	});
-	return {
-		statusCode: res.status,
+var wrapBodyStream = Symbol("wrapBodyStream");
+var newRequestFromIncoming = (method, url$1, headers, incoming, abortController) => {
+	const init = {
+		method,
 		headers,
-		body,
-		isBase64Encoded
+		signal: abortController.signal
+	};
+	if (method === "TRACE") {
+		init.method = "GET";
+		const req = new Request$2(url$1, init);
+		Object.defineProperty(req, "method", { get() {
+			return "TRACE";
+		} });
+		return req;
+	}
+	if (!(method === "GET" || method === "HEAD")) if ("rawBody" in incoming && incoming.rawBody instanceof Buffer) init.body = new ReadableStream({ start(controller) {
+		controller.enqueue(incoming.rawBody);
+		controller.close();
+	} });
+	else if (incoming[wrapBodyStream]) {
+		let reader;
+		init.body = new ReadableStream({ async pull(controller) {
+			try {
+				reader ||= Readable.toWeb(incoming).getReader();
+				const { done, value } = await reader.read();
+				if (done) controller.close();
+				else controller.enqueue(value);
+			} catch (error$51) {
+				controller.error(error$51);
+			}
+		} });
+	} else init.body = Readable.toWeb(incoming);
+	return new Request$2(url$1, init);
+};
+var getRequestCache = Symbol("getRequestCache");
+var requestCache = Symbol("requestCache");
+var incomingKey = Symbol("incomingKey");
+var urlKey = Symbol("urlKey");
+var headersKey = Symbol("headersKey");
+var abortControllerKey = Symbol("abortControllerKey");
+var requestPrototype = {
+	get method() {
+		return this[incomingKey].method || "GET";
+	},
+	get url() {
+		return this[urlKey];
+	},
+	get headers() {
+		return this[headersKey] ||= newHeadersFromIncoming(this[incomingKey]);
+	},
+	[Symbol("getAbortController")]() {
+		this[getRequestCache]();
+		return this[abortControllerKey];
+	},
+	[getRequestCache]() {
+		this[abortControllerKey] ||= new AbortController();
+		return this[requestCache] ||= newRequestFromIncoming(this.method, this[urlKey], this.headers, this[incomingKey], this[abortControllerKey]);
+	}
+};
+[
+	"body",
+	"bodyUsed",
+	"cache",
+	"credentials",
+	"destination",
+	"integrity",
+	"mode",
+	"redirect",
+	"referrer",
+	"referrerPolicy",
+	"signal",
+	"keepalive"
+].forEach((k) => {
+	Object.defineProperty(requestPrototype, k, { get() {
+		return this[getRequestCache]()[k];
+	} });
+});
+[
+	"arrayBuffer",
+	"blob",
+	"clone",
+	"formData",
+	"json",
+	"text"
+].forEach((k) => {
+	Object.defineProperty(requestPrototype, k, { value: function() {
+		return this[getRequestCache]()[k]();
+	} });
+});
+Object.defineProperty(requestPrototype, Symbol.for("nodejs.util.inspect.custom"), { value: function(depth, options, inspectFn) {
+	return `Request (lightweight) ${inspectFn({
+		method: this.method,
+		url: this.url,
+		headers: this.headers,
+		nativeRequest: this[requestCache]
+	}, {
+		...options,
+		depth: depth == null ? null : depth - 1
+	})}`;
+} });
+Object.setPrototypeOf(requestPrototype, Request$2.prototype);
+var newRequest = (incoming, defaultHostname) => {
+	const req = Object.create(requestPrototype);
+	req[incomingKey] = incoming;
+	const incomingUrl = incoming.url || "";
+	if (incomingUrl[0] !== "/" && (incomingUrl.startsWith("http://") || incomingUrl.startsWith("https://"))) {
+		if (incoming instanceof Http2ServerRequest) throw new RequestError("Absolute URL for :path is not allowed in HTTP/2");
+		try {
+			req[urlKey] = new URL(incomingUrl).href;
+		} catch (e) {
+			throw new RequestError("Invalid absolute URL", { cause: e });
+		}
+		return req;
+	}
+	const host = (incoming instanceof Http2ServerRequest ? incoming.authority : incoming.headers.host) || defaultHostname;
+	if (!host) throw new RequestError("Missing host header");
+	let scheme;
+	if (incoming instanceof Http2ServerRequest) {
+		scheme = incoming.scheme;
+		if (!(scheme === "http" || scheme === "https")) throw new RequestError("Unsupported scheme");
+	} else scheme = incoming.socket && incoming.socket.encrypted ? "https" : "http";
+	const url$1 = new URL(`${scheme}://${host}${incomingUrl}`);
+	if (url$1.hostname.length !== host.length && url$1.hostname !== host.replace(/:\d+$/, "")) throw new RequestError("Invalid host header");
+	req[urlKey] = url$1.href;
+	return req;
+};
+var responseCache = Symbol("responseCache");
+var getResponseCache = Symbol("getResponseCache");
+var cacheKey = Symbol("cache");
+var GlobalResponse = global.Response;
+var Response2 = class _Response {
+	#body;
+	#init;
+	[getResponseCache]() {
+		delete this[cacheKey];
+		return this[responseCache] ||= new GlobalResponse(this.#body, this.#init);
+	}
+	constructor(body, init) {
+		let headers;
+		this.#body = body;
+		if (init instanceof _Response) {
+			const cachedGlobalResponse = init[responseCache];
+			if (cachedGlobalResponse) {
+				this.#init = cachedGlobalResponse;
+				this[getResponseCache]();
+				return;
+			} else {
+				this.#init = init.#init;
+				headers = new Headers(init.#init.headers);
+			}
+		} else this.#init = init;
+		if (typeof body === "string" || typeof body?.getReader !== "undefined" || body instanceof Blob || body instanceof Uint8Array) this[cacheKey] = [
+			init?.status || 200,
+			body,
+			headers || init?.headers
+		];
+	}
+	get headers() {
+		const cache$2 = this[cacheKey];
+		if (cache$2) {
+			if (!(cache$2[2] instanceof Headers)) cache$2[2] = new Headers(cache$2[2] || { "content-type": "text/plain; charset=UTF-8" });
+			return cache$2[2];
+		}
+		return this[getResponseCache]().headers;
+	}
+	get status() {
+		return this[cacheKey]?.[0] ?? this[getResponseCache]().status;
+	}
+	get ok() {
+		const status = this.status;
+		return status >= 200 && status < 300;
+	}
+};
+[
+	"body",
+	"bodyUsed",
+	"redirected",
+	"statusText",
+	"trailers",
+	"type",
+	"url"
+].forEach((k) => {
+	Object.defineProperty(Response2.prototype, k, { get() {
+		return this[getResponseCache]()[k];
+	} });
+});
+[
+	"arrayBuffer",
+	"blob",
+	"clone",
+	"formData",
+	"json",
+	"text"
+].forEach((k) => {
+	Object.defineProperty(Response2.prototype, k, { value: function() {
+		return this[getResponseCache]()[k]();
+	} });
+});
+Object.defineProperty(Response2.prototype, Symbol.for("nodejs.util.inspect.custom"), { value: function(depth, options, inspectFn) {
+	return `Response (lightweight) ${inspectFn({
+		status: this.status,
+		headers: this.headers,
+		ok: this.ok,
+		nativeResponse: this[responseCache]
+	}, {
+		...options,
+		depth: depth == null ? null : depth - 1
+	})}`;
+} });
+Object.setPrototypeOf(Response2, GlobalResponse);
+Object.setPrototypeOf(Response2.prototype, GlobalResponse.prototype);
+async function readWithoutBlocking(readPromise) {
+	return Promise.race([readPromise, Promise.resolve().then(() => Promise.resolve(void 0))]);
+}
+function writeFromReadableStreamDefaultReader(reader, writable, currentReadPromise) {
+	const cancel = (error$51) => {
+		reader.cancel(error$51).catch(() => {});
+	};
+	writable.on("close", cancel);
+	writable.on("error", cancel);
+	(currentReadPromise ?? reader.read()).then(flow, handleStreamError);
+	return reader.closed.finally(() => {
+		writable.off("close", cancel);
+		writable.off("error", cancel);
+	});
+	function handleStreamError(error$51) {
+		if (error$51) writable.destroy(error$51);
+	}
+	function onDrain() {
+		reader.read().then(flow, handleStreamError);
+	}
+	function flow({ done, value }) {
+		try {
+			if (done) writable.end();
+			else if (!writable.write(value)) writable.once("drain", onDrain);
+			else return reader.read().then(flow, handleStreamError);
+		} catch (e) {
+			handleStreamError(e);
+		}
+	}
+}
+function writeFromReadableStream(stream, writable) {
+	if (stream.locked) throw new TypeError("ReadableStream is locked.");
+	else if (writable.destroyed) return;
+	return writeFromReadableStreamDefaultReader(stream.getReader(), writable);
+}
+var buildOutgoingHttpHeaders = (headers) => {
+	const res = {};
+	if (!(headers instanceof Headers)) headers = new Headers(headers ?? void 0);
+	const cookies = [];
+	for (const [k, v] of headers) if (k === "set-cookie") cookies.push(v);
+	else res[k] = v;
+	if (cookies.length > 0) res["set-cookie"] = cookies;
+	res["content-type"] ??= "text/plain; charset=UTF-8";
+	return res;
+};
+var X_ALREADY_SENT = "x-hono-already-sent";
+if (typeof global.crypto === "undefined") global.crypto = crypto$1;
+var outgoingEnded = Symbol("outgoingEnded");
+var incomingDraining = Symbol("incomingDraining");
+var DRAIN_TIMEOUT_MS = 500;
+var MAX_DRAIN_BYTES = 64 * 1024 * 1024;
+var drainIncoming = (incoming) => {
+	const incomingWithDrainState = incoming;
+	if (incoming.destroyed || incomingWithDrainState[incomingDraining]) return;
+	incomingWithDrainState[incomingDraining] = true;
+	if (incoming instanceof Http2ServerRequest) {
+		try {
+			incoming.stream?.close?.(constants.NGHTTP2_NO_ERROR);
+		} catch {}
+		return;
+	}
+	let bytesRead = 0;
+	const cleanup = () => {
+		clearTimeout(timer);
+		incoming.off("data", onData);
+		incoming.off("end", cleanup);
+		incoming.off("error", cleanup);
+	};
+	const forceClose = () => {
+		cleanup();
+		const socket = incoming.socket;
+		if (socket && !socket.destroyed) socket.destroySoon();
+	};
+	const timer = setTimeout(forceClose, DRAIN_TIMEOUT_MS);
+	timer.unref?.();
+	const onData = (chunk) => {
+		bytesRead += chunk.length;
+		if (bytesRead > MAX_DRAIN_BYTES) forceClose();
+	};
+	incoming.on("data", onData);
+	incoming.on("end", cleanup);
+	incoming.on("error", cleanup);
+	incoming.resume();
+};
+var handleRequestError = () => new Response(null, { status: 400 });
+var handleFetchError = (e) => new Response(null, { status: e instanceof Error && (e.name === "TimeoutError" || e.constructor.name === "TimeoutError") ? 504 : 500 });
+var handleResponseError = (e, outgoing) => {
+	const err = e instanceof Error ? e : new Error("unknown error", { cause: e });
+	if (err.code === "ERR_STREAM_PREMATURE_CLOSE") console.info("The user aborted a request.");
+	else {
+		console.error(e);
+		if (!outgoing.headersSent) outgoing.writeHead(500, { "Content-Type": "text/plain" });
+		outgoing.end(`Error: ${err.message}`);
+		outgoing.destroy(err);
+	}
+};
+var flushHeaders = (outgoing) => {
+	if ("flushHeaders" in outgoing && outgoing.writable) outgoing.flushHeaders();
+};
+var responseViaCache = async (res, outgoing) => {
+	let [status, body, header] = res[cacheKey];
+	let hasContentLength = false;
+	if (!header) header = { "content-type": "text/plain; charset=UTF-8" };
+	else if (header instanceof Headers) {
+		hasContentLength = header.has("content-length");
+		header = buildOutgoingHttpHeaders(header);
+	} else if (Array.isArray(header)) {
+		const headerObj = new Headers(header);
+		hasContentLength = headerObj.has("content-length");
+		header = buildOutgoingHttpHeaders(headerObj);
+	} else for (const key in header) if (key.length === 14 && key.toLowerCase() === "content-length") {
+		hasContentLength = true;
+		break;
+	}
+	if (!hasContentLength) {
+		if (typeof body === "string") header["Content-Length"] = Buffer.byteLength(body);
+		else if (body instanceof Uint8Array) header["Content-Length"] = body.byteLength;
+		else if (body instanceof Blob) header["Content-Length"] = body.size;
+	}
+	outgoing.writeHead(status, header);
+	if (typeof body === "string" || body instanceof Uint8Array) outgoing.end(body);
+	else if (body instanceof Blob) outgoing.end(new Uint8Array(await body.arrayBuffer()));
+	else {
+		flushHeaders(outgoing);
+		await writeFromReadableStream(body, outgoing)?.catch((e) => handleResponseError(e, outgoing));
+	}
+	outgoing[outgoingEnded]?.();
+};
+var isPromise$1 = (res) => typeof res.then === "function";
+var responseViaResponseObject = async (res, outgoing, options = {}) => {
+	if (isPromise$1(res)) if (options.errorHandler) try {
+		res = await res;
+	} catch (err) {
+		const errRes = await options.errorHandler(err);
+		if (!errRes) return;
+		res = errRes;
+	}
+	else res = await res.catch(handleFetchError);
+	if (cacheKey in res) return responseViaCache(res, outgoing);
+	const resHeaderRecord = buildOutgoingHttpHeaders(res.headers);
+	if (res.body) {
+		const reader = res.body.getReader();
+		const values = [];
+		let done = false;
+		let currentReadPromise = void 0;
+		if (resHeaderRecord["transfer-encoding"] !== "chunked") {
+			let maxReadCount = 2;
+			for (let i = 0; i < maxReadCount; i++) {
+				currentReadPromise ||= reader.read();
+				const chunk = await readWithoutBlocking(currentReadPromise).catch((e) => {
+					console.error(e);
+					done = true;
+				});
+				if (!chunk) {
+					if (i === 1) {
+						await new Promise((resolve$1) => setTimeout(resolve$1));
+						maxReadCount = 3;
+						continue;
+					}
+					break;
+				}
+				currentReadPromise = void 0;
+				if (chunk.value) values.push(chunk.value);
+				if (chunk.done) {
+					done = true;
+					break;
+				}
+			}
+			if (done && !("content-length" in resHeaderRecord)) resHeaderRecord["content-length"] = values.reduce((acc, value) => acc + value.length, 0);
+		}
+		outgoing.writeHead(res.status, resHeaderRecord);
+		values.forEach((value) => {
+			outgoing.write(value);
+		});
+		if (done) outgoing.end();
+		else {
+			if (values.length === 0) flushHeaders(outgoing);
+			await writeFromReadableStreamDefaultReader(reader, outgoing, currentReadPromise);
+		}
+	} else if (resHeaderRecord[X_ALREADY_SENT]) {} else {
+		outgoing.writeHead(res.status, resHeaderRecord);
+		outgoing.end();
+	}
+	outgoing[outgoingEnded]?.();
+};
+var getRequestListener = (fetchCallback, options = {}) => {
+	const autoCleanupIncoming = options.autoCleanupIncoming ?? true;
+	if (options.overrideGlobalObjects !== false && global.Request !== Request$2) {
+		Object.defineProperty(global, "Request", { value: Request$2 });
+		Object.defineProperty(global, "Response", { value: Response2 });
+	}
+	return async (incoming, outgoing) => {
+		let res, req;
+		try {
+			req = newRequest(incoming, options.hostname);
+			let incomingEnded = !autoCleanupIncoming || incoming.method === "GET" || incoming.method === "HEAD";
+			if (!incomingEnded) {
+				incoming[wrapBodyStream] = true;
+				incoming.on("end", () => {
+					incomingEnded = true;
+				});
+				if (incoming instanceof Http2ServerRequest) outgoing[outgoingEnded] = () => {
+					if (!incomingEnded) setTimeout(() => {
+						if (!incomingEnded) setTimeout(() => {
+							drainIncoming(incoming);
+						});
+					});
+				};
+				outgoing.on("finish", () => {
+					if (!incomingEnded) drainIncoming(incoming);
+				});
+			}
+			outgoing.on("close", () => {
+				if (req[abortControllerKey]) {
+					if (incoming.errored) req[abortControllerKey].abort(incoming.errored.toString());
+					else if (!outgoing.writableFinished) req[abortControllerKey].abort("Client connection prematurely closed.");
+				}
+				if (!incomingEnded) setTimeout(() => {
+					if (!incomingEnded) setTimeout(() => {
+						drainIncoming(incoming);
+					});
+				});
+			});
+			res = fetchCallback(req, {
+				incoming,
+				outgoing
+			});
+			if (cacheKey in res) return responseViaCache(res, outgoing);
+		} catch (e) {
+			if (!res) if (options.errorHandler) {
+				res = await options.errorHandler(req ? e : toRequestError(e));
+				if (!res) return;
+			} else if (!req) res = handleRequestError();
+			else res = handleFetchError(e);
+			else return handleResponseError(e, outgoing);
+		}
+		try {
+			return await responseViaResponseObject(res, outgoing, options);
+		} catch (e) {
+			return handleResponseError(e, outgoing);
+		}
 	};
 };
-const isContentTypeBinary = (contentType) => {
-	return !/^(text\/(plain|html|css|javascript|csv).*|application\/(.*json|.*xml).*|image\/svg\+xml.*)$/.test(contentType);
+var createAdaptorServer = (options) => {
+	const fetchCallback = options.fetch;
+	const requestListener = getRequestListener(fetchCallback, {
+		hostname: options.hostname,
+		overrideGlobalObjects: options.overrideGlobalObjects,
+		autoCleanupIncoming: options.autoCleanupIncoming
+	});
+	return (options.createServer || createServer)(options.serverOptions || {}, requestListener);
 };
-const isContentEncodingBinary = (contentEncoding) => {
-	if (contentEncoding === null) return false;
-	return /^(gzip|deflate|compress|br)/.test(contentEncoding);
+var serve = (options, listeningListener) => {
+	const server = createAdaptorServer(options);
+	server.listen(options?.port ?? 3e3, options.hostname, () => {
+		const serverInfo = server.address();
+		listeningListener && listeningListener(serverInfo);
+	});
+	return server;
 };
 var compose = (middleware, onError$2, onNotFound) => {
 	return (context, next) => {
@@ -109,13 +549,13 @@ var compose = (middleware, onError$2, onNotFound) => {
 			index$1 = i;
 			let res;
 			let isError = false;
-			let handler$1;
+			let handler;
 			if (middleware[i]) {
-				handler$1 = middleware[i][0][0];
+				handler = middleware[i][0][0];
 				context.req.routeIndex = i;
-			} else handler$1 = i === middleware.length && next || void 0;
-			if (handler$1) try {
-				res = await handler$1(context, () => dispatch(i + 1));
+			} else handler = i === middleware.length && next || void 0;
+			if (handler) try {
+				res = await handler(context, () => dispatch(i + 1));
 			} catch (err) {
 				if (err instanceof Error && onError$2) {
 					context.error = err;
@@ -212,9 +652,9 @@ var getPattern = (label, next) => {
 	if (label === "*") return "*";
 	const match$1 = label.match(/^\:([^\{\}]+)(?:\{(.+)\})?$/);
 	if (match$1) {
-		const cacheKey = `${label}#${next}`;
-		if (!patternCache[cacheKey]) if (match$1[2]) patternCache[cacheKey] = next && next[0] !== ":" && next[0] !== "*" ? [
-			cacheKey,
+		const cacheKey$1 = `${label}#${next}`;
+		if (!patternCache[cacheKey$1]) if (match$1[2]) patternCache[cacheKey$1] = next && next[0] !== ":" && next[0] !== "*" ? [
+			cacheKey$1,
 			match$1[1],
 			/* @__PURE__ */ new RegExp(`^${match$1[2]}(?=/${next})`)
 		] : [
@@ -222,12 +662,12 @@ var getPattern = (label, next) => {
 			match$1[1],
 			/* @__PURE__ */ new RegExp(`^${match$1[2]}$`)
 		];
-		else patternCache[cacheKey] = [
+		else patternCache[cacheKey$1] = [
 			label,
 			match$1[1],
 			true
 		];
-		return patternCache[cacheKey];
+		return patternCache[cacheKey$1];
 	}
 	return null;
 };
@@ -643,8 +1083,8 @@ var Hono$1 = class _Hono {
 			this[method] = (args1, ...args) => {
 				if (typeof args1 === "string") this.#path = args1;
 				else this.#addRoute(method, this.#path, args1);
-				args.forEach((handler$1) => {
-					this.#addRoute(method, this.#path, handler$1);
+				args.forEach((handler) => {
+					this.#addRoute(method, this.#path, handler);
 				});
 				return this;
 			};
@@ -652,8 +1092,8 @@ var Hono$1 = class _Hono {
 		this.on = (method, path$1, ...handlers) => {
 			for (const p of [path$1].flat()) {
 				this.#path = p;
-				for (const m of [method].flat()) handlers.map((handler$1) => {
-					this.#addRoute(m.toUpperCase(), this.#path, handler$1);
+				for (const m of [method].flat()) handlers.map((handler) => {
+					this.#addRoute(m.toUpperCase(), this.#path, handler);
 				});
 			}
 			return this;
@@ -664,8 +1104,8 @@ var Hono$1 = class _Hono {
 				this.#path = "*";
 				handlers.unshift(arg1);
 			}
-			handlers.forEach((handler$1) => {
-				this.#addRoute("ALL", this.#path, handler$1);
+			handlers.forEach((handler) => {
+				this.#addRoute("ALL", this.#path, handler);
 			});
 			return this;
 		};
@@ -688,13 +1128,13 @@ var Hono$1 = class _Hono {
 	route(path$1, app$1) {
 		const subApp = this.basePath(path$1);
 		app$1.routes.map((r) => {
-			let handler$1;
-			if (app$1.errorHandler === errorHandler) handler$1 = r.handler;
+			let handler;
+			if (app$1.errorHandler === errorHandler) handler = r.handler;
 			else {
-				handler$1 = async (c, next) => (await compose([], app$1.errorHandler)(c, () => r.handler(c, next))).res;
-				handler$1[COMPOSED_HANDLER] = r.handler;
+				handler = async (c, next) => (await compose([], app$1.errorHandler)(c, () => r.handler(c, next))).res;
+				handler[COMPOSED_HANDLER] = r.handler;
 			}
-			subApp.#addRoute(r.method, r.path, handler$1, r.basePath);
+			subApp.#addRoute(r.method, r.path, handler, r.basePath);
 		});
 		return this;
 	}
@@ -703,12 +1143,12 @@ var Hono$1 = class _Hono {
 		subApp._basePath = mergePath(this._basePath, path$1);
 		return subApp;
 	}
-	onError = (handler$1) => {
-		this.errorHandler = handler$1;
+	onError = (handler) => {
+		this.errorHandler = handler;
 		return this;
 	};
-	notFound = (handler$1) => {
-		this.#notFoundHandler = handler$1;
+	notFound = (handler) => {
+		this.#notFoundHandler = handler;
 		return this;
 	};
 	mount(path$1, applicationHandler, options) {
@@ -739,24 +1179,24 @@ var Hono$1 = class _Hono {
 				return new Request(url$1, request);
 			};
 		})();
-		const handler$1 = async (c, next) => {
+		const handler = async (c, next) => {
 			const res = await applicationHandler(replaceRequest(c.req.raw), ...getOptions(c));
 			if (res) return res;
 			await next();
 		};
-		this.#addRoute("ALL", mergePath(path$1, "*"), handler$1);
+		this.#addRoute("ALL", mergePath(path$1, "*"), handler);
 		return this;
 	}
-	#addRoute(method, path$1, handler$1, baseRoutePath) {
+	#addRoute(method, path$1, handler, baseRoutePath) {
 		method = method.toUpperCase();
 		path$1 = mergePath(this._basePath, path$1);
 		const r = {
 			basePath: baseRoutePath !== void 0 ? mergePath(this._basePath, baseRoutePath) : this._basePath,
 			path: path$1,
 			method,
-			handler: handler$1
+			handler
 		};
-		this.router.add(method, path$1, [handler$1, r]);
+		this.router.add(method, path$1, [handler, r]);
 		this.routes.push(r);
 	}
 	#handleError(err, c) {
@@ -1024,7 +1464,7 @@ var RegExpRouter = class {
 		this.#middleware = { ["ALL"]: /* @__PURE__ */ Object.create(null) };
 		this.#routes = { ["ALL"]: /* @__PURE__ */ Object.create(null) };
 	}
-	add(method, path$1, handler$1) {
+	add(method, path$1, handler) {
 		const middleware = this.#middleware;
 		const routes = this.#routes;
 		if (!middleware || !routes) throw new Error(MESSAGE_MATCHER_IS_ALREADY_BUILT);
@@ -1044,11 +1484,11 @@ var RegExpRouter = class {
 			else middleware[method][path$1] ||= findMiddleware(middleware[method], path$1) || findMiddleware(middleware["ALL"], path$1) || [];
 			Object.keys(middleware).forEach((m) => {
 				if (method === "ALL" || method === m) Object.keys(middleware[m]).forEach((p) => {
-					re.test(p) && middleware[m][p].push([handler$1, paramCount]);
+					re.test(p) && middleware[m][p].push([handler, paramCount]);
 				});
 			});
 			Object.keys(routes).forEach((m) => {
-				if (method === "ALL" || method === m) Object.keys(routes[m]).forEach((p) => re.test(p) && routes[m][p].push([handler$1, paramCount]));
+				if (method === "ALL" || method === m) Object.keys(routes[m]).forEach((p) => re.test(p) && routes[m][p].push([handler, paramCount]));
 			});
 			return;
 		}
@@ -1058,7 +1498,7 @@ var RegExpRouter = class {
 			Object.keys(routes).forEach((m) => {
 				if (method === "ALL" || method === m) {
 					routes[m][path2] ||= [...findMiddleware(middleware[m], path2) || findMiddleware(middleware["ALL"], path2) || []];
-					routes[m][path2].push([handler$1, paramCount - len + i + 1]);
+					routes[m][path2].push([handler, paramCount - len + i + 1]);
 				}
 			});
 		}
@@ -1094,12 +1534,12 @@ var SmartRouter = class {
 	constructor(init) {
 		this.#routers = init.routers;
 	}
-	add(method, path$1, handler$1) {
+	add(method, path$1, handler) {
 		if (!this.#routes) throw new Error(MESSAGE_MATCHER_IS_ALREADY_BUILT);
 		this.#routes.push([
 			method,
 			path$1,
-			handler$1
+			handler
 		]);
 	}
 	match(method, path$1) {
@@ -1143,13 +1583,13 @@ var Node = class _Node {
 	#patterns;
 	#order = 0;
 	#params = emptyParams;
-	constructor(method, handler$1, children) {
+	constructor(method, handler, children) {
 		this.#children = children || /* @__PURE__ */ Object.create(null);
 		this.#methods = [];
-		if (method && handler$1) {
+		if (method && handler) {
 			const m = /* @__PURE__ */ Object.create(null);
 			m[method] = {
-				handler: handler$1,
+				handler,
 				possibleKeys: [],
 				score: 0
 			};
@@ -1157,7 +1597,7 @@ var Node = class _Node {
 		}
 		this.#patterns = [];
 	}
-	insert(method, path$1, handler$1) {
+	insert(method, path$1, handler) {
 		this.#order = ++this.#order;
 		let curNode = this;
 		const parts = splitRoutingPath(path$1);
@@ -1180,7 +1620,7 @@ var Node = class _Node {
 			curNode = curNode.#children[key];
 		}
 		curNode.#methods.push({ [method]: {
-			handler: handler$1,
+			handler,
 			possibleKeys: possibleKeys.filter((v, i, a) => a.indexOf(v) === i),
 			score: this.#order
 		} });
@@ -1280,7 +1720,7 @@ var Node = class _Node {
 		if (handlerSets.length > 1) handlerSets.sort((a, b) => {
 			return a.score - b.score;
 		});
-		return [handlerSets.map(({ handler: handler$1, params }) => [handler$1, params])];
+		return [handlerSets.map(({ handler, params }) => [handler, params])];
 	}
 };
 var TrieRouter = class {
@@ -1289,13 +1729,13 @@ var TrieRouter = class {
 	constructor() {
 		this.#node = new Node();
 	}
-	add(method, path$1, handler$1) {
+	add(method, path$1, handler) {
 		const results = checkOptionalParameter(path$1);
 		if (results) {
-			for (let i = 0, len = results.length; i < len; i++) this.#node.insert(method, results[i], handler$1);
+			for (let i = 0, len = results.length; i < len; i++) this.#node.insert(method, results[i], handler);
 			return;
 		}
-		this.#node.insert(method, path$1, handler$1);
+		this.#node.insert(method, path$1, handler);
 	}
 	match(method, path$1) {
 		return this.#node.search(method, path$1);
@@ -3326,8 +3766,8 @@ var handleKeyObject = (keyObject, alg$1) => {
 	cache$1 ||= /* @__PURE__ */ new WeakMap();
 	let cached$1 = cache$1.get(keyObject);
 	if (cached$1?.[alg$1]) return cached$1[alg$1];
-	const isPublic$3 = keyObject.type === "public";
-	const extractable = isPublic$3 ? true : false;
+	const isPublic$4 = keyObject.type === "public";
+	const extractable = isPublic$4 ? true : false;
 	let cryptoKey;
 	if (keyObject.asymmetricKeyType === "x25519") {
 		switch (alg$1) {
@@ -3337,18 +3777,18 @@ var handleKeyObject = (keyObject, alg$1) => {
 			case "ECDH-ES+A256KW": break;
 			default: throw new TypeError(unusableForAlg);
 		}
-		cryptoKey = keyObject.toCryptoKey(keyObject.asymmetricKeyType, extractable, isPublic$3 ? [] : ["deriveBits"]);
+		cryptoKey = keyObject.toCryptoKey(keyObject.asymmetricKeyType, extractable, isPublic$4 ? [] : ["deriveBits"]);
 	}
 	if (keyObject.asymmetricKeyType === "ed25519") {
 		if (alg$1 !== "EdDSA" && alg$1 !== "Ed25519") throw new TypeError(unusableForAlg);
-		cryptoKey = keyObject.toCryptoKey(keyObject.asymmetricKeyType, extractable, [isPublic$3 ? "verify" : "sign"]);
+		cryptoKey = keyObject.toCryptoKey(keyObject.asymmetricKeyType, extractable, [isPublic$4 ? "verify" : "sign"]);
 	}
 	switch (keyObject.asymmetricKeyType) {
 		case "ml-dsa-44":
 		case "ml-dsa-65":
 		case "ml-dsa-87":
 			if (alg$1 !== keyObject.asymmetricKeyType.toUpperCase()) throw new TypeError(unusableForAlg);
-			cryptoKey = keyObject.toCryptoKey(keyObject.asymmetricKeyType, extractable, [isPublic$3 ? "verify" : "sign"]);
+			cryptoKey = keyObject.toCryptoKey(keyObject.asymmetricKeyType, extractable, [isPublic$4 ? "verify" : "sign"]);
 	}
 	if (keyObject.asymmetricKeyType === "rsa") {
 		let hash$1;
@@ -3376,11 +3816,11 @@ var handleKeyObject = (keyObject, alg$1) => {
 		if (alg$1.startsWith("RSA-OAEP")) return keyObject.toCryptoKey({
 			name: "RSA-OAEP",
 			hash: hash$1
-		}, extractable, isPublic$3 ? ["encrypt"] : ["decrypt"]);
+		}, extractable, isPublic$4 ? ["encrypt"] : ["decrypt"]);
 		cryptoKey = keyObject.toCryptoKey({
 			name: alg$1.startsWith("PS") ? "RSA-PSS" : "RSASSA-PKCS1-v1_5",
 			hash: hash$1
-		}, extractable, [isPublic$3 ? "verify" : "sign"]);
+		}, extractable, [isPublic$4 ? "verify" : "sign"]);
 	}
 	if (keyObject.asymmetricKeyType === "ec") {
 		const namedCurve = new Map([
@@ -3397,11 +3837,11 @@ var handleKeyObject = (keyObject, alg$1) => {
 		if (expectedCurve[alg$1] && namedCurve === expectedCurve[alg$1]) cryptoKey = keyObject.toCryptoKey({
 			name: "ECDSA",
 			namedCurve
-		}, extractable, [isPublic$3 ? "verify" : "sign"]);
+		}, extractable, [isPublic$4 ? "verify" : "sign"]);
 		if (alg$1.startsWith("ECDH-ES")) cryptoKey = keyObject.toCryptoKey({
 			name: "ECDH",
 			namedCurve
-		}, extractable, isPublic$3 ? [] : ["deriveBits"]);
+		}, extractable, isPublic$4 ? [] : ["deriveBits"]);
 	}
 	if (!cryptoKey) throw new TypeError(unusableForAlg);
 	if (!cached$1) cache$1.set(keyObject, { [alg$1]: cryptoKey });
@@ -18761,10 +19201,10 @@ function filterOutputFields(data, additionalFields) {
 }
 var cache = /* @__PURE__ */ new WeakMap();
 function getFields(options, modelName, mode) {
-	const cacheKey = `${modelName}:${mode}`;
+	const cacheKey$1 = `${modelName}:${mode}`;
 	if (!cache.has(options)) cache.set(options, /* @__PURE__ */ new Map());
 	const tableCache = cache.get(options);
-	if (tableCache.has(cacheKey)) return tableCache.get(cacheKey);
+	if (tableCache.has(cacheKey$1)) return tableCache.get(cacheKey$1);
 	const coreSchema$1 = mode === "output" ? getAuthTables(options)[modelName]?.fields ?? {} : {};
 	const additionalFields = modelName === "user" || modelName === "session" || modelName === "account" ? options[modelName]?.additionalFields : void 0;
 	let schema$1 = {
@@ -18775,7 +19215,7 @@ function getFields(options, modelName, mode) {
 		...schema$1,
 		...plugin.schema[modelName].fields
 	};
-	tableCache.set(cacheKey, schema$1);
+	tableCache.set(cacheKey$1, schema$1);
 	return schema$1;
 }
 function parseUserOutput(options, user$1) {
@@ -21664,7 +22104,7 @@ var createInternalContext = async (context, { options, path: path$1 }) => {
 function createEndpoint(pathOrOptions, handlerOrOptions, handlerOrNever) {
 	const path$1 = typeof pathOrOptions === "string" ? pathOrOptions : void 0;
 	const options = typeof handlerOrOptions === "object" ? handlerOrOptions : pathOrOptions;
-	const handler$1 = typeof handlerOrOptions === "function" ? handlerOrOptions : handlerOrNever;
+	const handler = typeof handlerOrOptions === "function" ? handlerOrOptions : handlerOrNever;
 	if ((options.method === "GET" || options.method === "HEAD") && options.body) throw new BetterCallError("Body is not allowed with GET or HEAD methods");
 	if (path$1 && /\/{2,}/.test(path$1)) throw new BetterCallError("Path cannot contain consecutive slashes");
 	const internalHandler = async (...inputCtx) => {
@@ -21684,7 +22124,7 @@ function createEndpoint(pathOrOptions, handlerOrOptions, handlerOrNever) {
 				code: "VALIDATION_ERROR"
 			});
 		}
-		const response = await handler$1(internalContext).catch(async (e) => {
+		const response = await handler(internalContext).catch(async (e) => {
 			if (isAPIError$1(e)) {
 				const onAPIError = options.onAPIError;
 				if (onAPIError) await onAPIError(e);
@@ -21714,17 +22154,17 @@ function createEndpoint(pathOrOptions, handlerOrOptions, handlerOrNever) {
 	return internalHandler;
 }
 createEndpoint.create = (opts) => {
-	return (path$1, options, handler$1) => {
+	return (path$1, options, handler) => {
 		return createEndpoint(path$1, {
 			...options,
 			use: [...options?.use || [], ...opts?.use || []]
-		}, handler$1);
+		}, handler);
 	};
 };
-function createMiddleware(optionsOrHandler, handler$1) {
+function createMiddleware(optionsOrHandler, handler) {
 	const internalHandler = async (inputCtx) => {
 		const context = inputCtx;
-		const _handler = typeof optionsOrHandler === "function" ? optionsOrHandler : handler$1;
+		const _handler = typeof optionsOrHandler === "function" ? optionsOrHandler : handler;
 		const internalContext = await createInternalContext(context, {
 			options: typeof optionsOrHandler === "function" ? {} : optionsOrHandler,
 			path: "/"
@@ -21752,14 +22192,14 @@ function createMiddleware(optionsOrHandler, handler$1) {
 	return internalHandler;
 }
 createMiddleware.create = (opts) => {
-	function fn(optionsOrHandler, handler$1) {
+	function fn(optionsOrHandler, handler) {
 		if (typeof optionsOrHandler === "function") return createMiddleware({ use: opts?.use }, optionsOrHandler);
-		if (!handler$1) throw new Error("Middleware handler is required");
+		if (!handler) throw new Error("Middleware handler is required");
 		return createMiddleware({
 			...optionsOrHandler,
 			method: "*",
 			use: [...opts?.use || [], ...optionsOrHandler.use || []]
-		}, handler$1);
+		}, handler);
 	}
 	return fn;
 };
@@ -22186,16 +22626,16 @@ var createRouter$1 = (endpoints, config$2) => {
 			else query[key] = [query[key], value];
 			else query[key] = value;
 		});
-		const handler$1 = route.data;
+		const handler = route.data;
 		try {
-			const allowedMediaTypes = handler$1.options.metadata?.allowedMediaTypes || config$2?.allowedMediaTypes;
+			const allowedMediaTypes = handler.options.metadata?.allowedMediaTypes || config$2?.allowedMediaTypes;
 			const context = {
 				path: path$1,
 				method: request.method,
 				headers: request.headers,
 				params: route.params ? JSON.parse(JSON.stringify(route.params)) : {},
 				request,
-				body: handler$1.options.disableBody ? void 0 : await getBody$1(handler$1.options.cloneRequest ? request.clone() : request, allowedMediaTypes),
+				body: handler.options.disableBody ? void 0 : await getBody$1(handler.options.cloneRequest ? request.clone() : request, allowedMediaTypes),
 				query,
 				_flag: "router",
 				asResponse: true,
@@ -22210,11 +22650,11 @@ var createRouter$1 = (endpoints, config$2) => {
 				});
 				if (res instanceof Response) return res;
 			}
-			return await handler$1(context);
+			return await handler(context);
 		} catch (error$51) {
 			if (config$2?.onError) try {
-				const errorResponse = await config$2.onError(error$51, request);
-				if (errorResponse instanceof Response) return toResponse(errorResponse);
+				const errorResponse$1 = await config$2.onError(error$51, request);
+				if (errorResponse$1 instanceof Response) return toResponse(errorResponse$1);
 			} catch (error$52) {
 				if (isAPIError$1(error$52)) return toResponse(error$52);
 				throw error$52;
@@ -22263,11 +22703,11 @@ var use = [optionsMiddleware];
 function createAuthEndpoint(pathOrOptions, handlerOrOptions, handlerOrNever) {
 	const path$1 = typeof pathOrOptions === "string" ? pathOrOptions : void 0;
 	const options = typeof handlerOrOptions === "object" ? handlerOrOptions : pathOrOptions;
-	const handler$1 = typeof handlerOrOptions === "function" ? handlerOrOptions : handlerOrNever;
+	const handler = typeof handlerOrOptions === "function" ? handlerOrOptions : handlerOrNever;
 	const wrapped = async (ctx) => {
 		const runtimeCtx = ctx;
 		try {
-			return await runWithEndpointContext(ctx, () => handler$1(ctx));
+			return await runWithEndpointContext(ctx, () => handler(ctx));
 		} catch (e) {
 			attachResponseHeadersToAPIError(runtimeCtx.responseHeaders, e);
 			throw e;
@@ -30566,8 +31006,8 @@ var createBetterAuth = (options, initFn) => {
 				handlerCtx.trustedOrigins = await getTrustedOrigins(ctx.options, request);
 				handlerCtx.trustedProviders = await getTrustedProviders(ctx.options, request);
 			}
-			const { handler: handler$1 } = router(handlerCtx, options);
-			return runWithAdapter(handlerCtx.adapter, () => handler$1(request));
+			const { handler } = router(handlerCtx, options);
+			return runWithAdapter(handlerCtx.adapter, () => handler(request));
 		},
 		api,
 		options,
@@ -35513,6 +35953,9 @@ var Index = class {
 function index(name) {
 	return new IndexBuilderOn(name, false);
 }
+function uniqueIndex(name) {
+	return new IndexBuilderOn(name, true);
+}
 function extractUsedTable(table) {
 	if (is(table, SQLiteTable)) return [`${table[Table.Symbol.BaseName]}`];
 	if (is(table, Subquery)) return table._.usedTables ?? [];
@@ -37089,6 +37532,11 @@ var SQLiteTransaction = class extends BaseSQLiteDatabase {
 };
 var schema_exports = /* @__PURE__ */ __export({
 	account: () => account,
+	inventory: () => inventory,
+	movements: () => movements,
+	operations: () => operations,
+	productVariants: () => productVariants,
+	products: () => products,
 	session: () => session,
 	storageFiles: () => storageFiles,
 	todos: () => todos,
@@ -37172,6 +37620,66 @@ const storageFiles = sqliteTable("storage_files", {
 	index("idx_storage_files_userId").on(table.userId),
 	index("idx_storage_files_objectKey").on(table.objectKey),
 	index("idx_storage_files_status").on(table.status)
+]);
+const products = sqliteTable("products", {
+	id: text("id").primaryKey(),
+	name: text("name").notNull(),
+	sku: text("sku").notNull(),
+	requiresColor: integer("requires_color", { mode: "boolean" }).notNull().default(false),
+	bagType: text("bag_type", { enum: ["ALTA", "BAJA"] }),
+	sortOrder: integer("sort_order").notNull().default(0),
+	active: integer("active", { mode: "boolean" }).notNull().default(true),
+	createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`)
+}, (table) => [uniqueIndex("ux_products_name").on(table.name), uniqueIndex("ux_products_sku").on(table.sku)]);
+const productVariants = sqliteTable("product_variants", {
+	id: text("id").primaryKey(),
+	productId: text("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
+	color: text("color"),
+	sku: text("sku").notNull(),
+	sortOrder: integer("sort_order").notNull().default(0),
+	active: integer("active", { mode: "boolean" }).notNull().default(true),
+	createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`)
+}, (table) => [
+	index("idx_variants_product").on(table.productId),
+	uniqueIndex("ux_variants_sku").on(table.sku),
+	uniqueIndex("ux_variants_product_color").on(table.productId, table.color)
+]);
+const inventory = sqliteTable("inventory", {
+	variantId: text("variant_id").primaryKey().references(() => productVariants.id, { onDelete: "cascade" }),
+	stock: integer("stock").notNull().default(0),
+	minimumStock: integer("minimum_stock").notNull().default(50),
+	updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`)
+}, (table) => [index("idx_inventory_stock").on(table.stock)]);
+const operations = sqliteTable("operations", {
+	id: text("id").primaryKey(),
+	kind: text("kind", { enum: ["PRODUCCION", "DESPACHO"] }).notNull(),
+	productId: text("product_id").notNull().references(() => products.id),
+	variantId: text("variant_id").notNull().references(() => productVariants.id),
+	quantity: integer("quantity").notNull(),
+	operator: text("operator"),
+	bagQuantity: integer("bag_quantity").notNull().default(0),
+	operationDate: text("operation_date").notNull(),
+	notes: text("notes"),
+	createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`)
+}, (table) => [index("idx_operations_kind_date").on(table.kind, table.operationDate), index("idx_operations_variant").on(table.variantId)]);
+const movements = sqliteTable("movements", {
+	id: text("id").primaryKey(),
+	operationId: text("operation_id").notNull().references(() => operations.id, { onDelete: "cascade" }),
+	variantId: text("variant_id").notNull().references(() => productVariants.id),
+	type: text("type", { enum: ["ENTRADA", "SALIDA"] }).notNull(),
+	reason: text("reason", { enum: [
+		"PRODUCCION",
+		"DESPACHO",
+		"CONSUMO_BOLSA"
+	] }).notNull(),
+	quantity: integer("quantity").notNull(),
+	stockBefore: integer("stock_before").notNull(),
+	stockAfter: integer("stock_after").notNull(),
+	occurredAt: text("occurred_at").notNull().default(sql`CURRENT_TIMESTAMP`)
+}, (table) => [
+	index("idx_movements_occurred").on(table.occurredAt),
+	index("idx_movements_variant").on(table.variantId),
+	index("idx_movements_operation").on(table.operationId)
 ]);
 var LibsqlError = class extends Error {
 	code;
@@ -38803,13 +39311,13 @@ var require_event_target = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		ErrorEvent,
 		Event,
 		EventTarget: {
-			addEventListener(type, handler$1, options = {}) {
-				for (const listener of this.listeners(type)) if (!options[kForOnEventAttribute$1] && listener[kListener$1] === handler$1 && !listener[kForOnEventAttribute$1]) return;
+			addEventListener(type, handler, options = {}) {
+				for (const listener of this.listeners(type)) if (!options[kForOnEventAttribute$1] && listener[kListener$1] === handler && !listener[kForOnEventAttribute$1]) return;
 				let wrapper;
 				if (type === "message") wrapper = function onMessage(data, isBinary) {
 					const event = new MessageEvent("message", { data: isBinary ? data : data.toString() });
 					event[kTarget] = this;
-					callListener(handler$1, this, event);
+					callListener(handler, this, event);
 				};
 				else if (type === "close") wrapper = function onClose(code, message$1) {
 					const event = new CloseEvent("close", {
@@ -38818,7 +39326,7 @@ var require_event_target = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 						wasClean: this._closeFrameReceived && this._closeFrameSent
 					});
 					event[kTarget] = this;
-					callListener(handler$1, this, event);
+					callListener(handler, this, event);
 				};
 				else if (type === "error") wrapper = function onError$2(error$51) {
 					const event = new ErrorEvent("error", {
@@ -38826,21 +39334,21 @@ var require_event_target = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 						message: error$51.message
 					});
 					event[kTarget] = this;
-					callListener(handler$1, this, event);
+					callListener(handler, this, event);
 				};
 				else if (type === "open") wrapper = function onOpen() {
 					const event = new Event("open");
 					event[kTarget] = this;
-					callListener(handler$1, this, event);
+					callListener(handler, this, event);
 				};
 				else return;
 				wrapper[kForOnEventAttribute$1] = !!options[kForOnEventAttribute$1];
-				wrapper[kListener$1] = handler$1;
+				wrapper[kListener$1] = handler;
 				if (options.once) this.once(type, wrapper);
 				else this.on(type, wrapper);
 			},
-			removeEventListener(type, handler$1) {
-				for (const listener of this.listeners(type)) if (listener[kListener$1] === handler$1 && !listener[kForOnEventAttribute$1]) {
+			removeEventListener(type, handler) {
+				for (const listener of this.listeners(type)) if (listener[kListener$1] === handler && !listener[kForOnEventAttribute$1]) {
 					this.removeListener(type, listener);
 					break;
 				}
@@ -38977,7 +39485,7 @@ var require_websocket = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 	var net = __require("net");
 	var tls = __require("tls");
 	var { randomBytes: randomBytes$1, createHash: createHash$1 } = __require("crypto");
-	var { Duplex: Duplex$2, Readable } = __require("stream");
+	var { Duplex: Duplex$2, Readable: Readable$1 } = __require("stream");
 	var { URL: URL$1 } = __require("url");
 	var PerMessageDeflate$2 = require_permessage_deflate();
 	var Receiver$1 = require_receiver();
@@ -39268,13 +39776,13 @@ var require_websocket = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 				for (const listener of this.listeners(method)) if (listener[kForOnEventAttribute]) return listener[kListener];
 				return null;
 			},
-			set(handler$1) {
+			set(handler) {
 				for (const listener of this.listeners(method)) if (listener[kForOnEventAttribute]) {
 					this.removeListener(method, listener);
 					break;
 				}
-				if (typeof handler$1 !== "function") return;
-				this.addEventListener(method, handler$1, { [kForOnEventAttribute]: true });
+				if (typeof handler !== "function") return;
+				this.addEventListener(method, handler, { [kForOnEventAttribute]: true });
 			}
 		});
 	});
@@ -42655,10 +43163,10 @@ var HttpStream = class extends Stream {
 		this.#cursor = cursor;
 		this.#flush(() => this.#createCursorRequest(entry, endpoint), (resp) => cursor.open(resp), (respBody) => respBody.baton, (respBody) => respBody.baseUrl, (_respBody) => entry.cursorCallback(cursor), (error$51) => entry.errorCallback(error$51));
 	}
-	#flush(createRequest$1, decodeResponse, getBaton, getBaseUrl, handleResponse, handleError) {
+	#flush(createRequest, decodeResponse, getBaton, getBaseUrl, handleResponse, handleError) {
 		let promise$1;
 		try {
-			const request = createRequest$1();
+			const request = createRequest();
 			const fetch$1 = this.#fetch;
 			promise$1 = fetch$1(request);
 		} catch (error$51) {
@@ -44166,6 +44674,9 @@ authConfigRouter.get("/", (c) => {
 		thirdPartySocialProviders: enabledThirdPartySocialProviders
 	}));
 });
+const publicRoute = async (_c, next) => {
+	await next();
+};
 const protectedRoute = async (c, next) => {
 	const user$1 = c.var.user;
 	if (!user$1) return c.json(apiFailure("UNAUTHORIZED", "Unauthorized"), 401);
@@ -44339,6 +44850,212 @@ emailVerificationRouter.post("/verify-code", protectedRoute, async (c) => {
 	await getDb().delete(verification).where(eq(verification.identifier, identifier));
 	return c.json(apiSuccess({ verified: true }), 200);
 });
+var ErpBusinessError = class extends Error {
+	constructor(code, message$1, status) {
+		super(message$1);
+		this.code = code;
+		this.status = status;
+		this.name = "ErpBusinessError";
+	}
+};
+function mapInventoryRow(row) {
+	return {
+		id: row.variantId,
+		productId: row.productId,
+		productName: row.productName,
+		productSku: row.productSku,
+		requiresColor: row.requiresColor,
+		bagType: row.bagType,
+		color: row.color,
+		sku: row.variantSku,
+		stock: row.stock,
+		minimumStock: row.minimumStock,
+		updatedAt: row.updatedAt,
+		productSort: row.productSort,
+		variantSort: row.variantSort
+	};
+}
+async function getErpSnapshot(date$4) {
+	const db$1 = getDb();
+	const inventoryRows = await db$1.select({
+		productId: products.id,
+		productName: products.name,
+		productSku: products.sku,
+		requiresColor: products.requiresColor,
+		bagType: products.bagType,
+		productSort: products.sortOrder,
+		variantId: productVariants.id,
+		color: productVariants.color,
+		variantSku: productVariants.sku,
+		variantSort: productVariants.sortOrder,
+		stock: inventory.stock,
+		minimumStock: inventory.minimumStock,
+		updatedAt: inventory.updatedAt
+	}).from(products).innerJoin(productVariants, eq(productVariants.productId, products.id)).innerJoin(inventory, eq(inventory.variantId, productVariants.id)).where(and(eq(products.active, true), eq(productVariants.active, true))).orderBy(asc(products.sortOrder), asc(productVariants.sortOrder));
+	const recentMovements = await db$1.select({
+		id: movements.id,
+		operationId: movements.operationId,
+		variantId: movements.variantId,
+		type: movements.type,
+		reason: movements.reason,
+		quantity: movements.quantity,
+		stockBefore: movements.stockBefore,
+		stockAfter: movements.stockAfter,
+		occurredAt: movements.occurredAt,
+		productName: products.name,
+		color: productVariants.color,
+		operator: operations.operator,
+		notes: operations.notes
+	}).from(movements).innerJoin(productVariants, eq(productVariants.id, movements.variantId)).innerJoin(products, eq(products.id, productVariants.productId)).innerJoin(operations, eq(operations.id, movements.operationId)).orderBy(desc(movements.occurredAt)).limit(200);
+	const dayTotals = await db$1.select({
+		kind: operations.kind,
+		total: sql`coalesce(sum(${operations.quantity}), 0)`.mapWith(Number),
+		count: sql`count(*)`.mapWith(Number)
+	}).from(operations).where(eq(operations.operationDate, date$4)).groupBy(operations.kind);
+	const items = inventoryRows.map(mapInventoryRow);
+	const production = dayTotals.find((item) => item.kind === "PRODUCCION");
+	const dispatch = dayTotals.find((item) => item.kind === "DESPACHO");
+	return {
+		date: date$4,
+		inventory: items,
+		movements: recentMovements,
+		dashboard: {
+			totalStock: items.reduce((sumValue, item) => sumValue + item.stock, 0),
+			productionToday: production?.total ?? 0,
+			productionCount: production?.count ?? 0,
+			dispatchToday: dispatch?.total ?? 0,
+			dispatchCount: dispatch?.count ?? 0,
+			lowStockCount: items.filter((item) => item.stock < item.minimumStock).length
+		}
+	};
+}
+async function getVariantContext(tx, productId, variantId) {
+	return (await tx.select({
+		productId: products.id,
+		productName: products.name,
+		requiresColor: products.requiresColor,
+		bagType: products.bagType,
+		variantId: productVariants.id,
+		color: productVariants.color,
+		stock: inventory.stock
+	}).from(productVariants).innerJoin(products, eq(products.id, productVariants.productId)).innerJoin(inventory, eq(inventory.variantId, productVariants.id)).where(and(eq(products.id, productId), eq(productVariants.id, variantId))).limit(1))[0];
+}
+async function applyStockMovement(tx, input) {
+	const current = (await tx.select({ stock: inventory.stock }).from(inventory).where(eq(inventory.variantId, input.variantId)).limit(1))[0];
+	if (!current) throw new ErpBusinessError("NOT_FOUND", "No se encontró el inventario solicitado.", 404);
+	const nextStock = input.type === "ENTRADA" ? current.stock + input.quantity : current.stock - input.quantity;
+	if (nextStock < 0) throw new ErpBusinessError("INSUFFICIENT_STOCK", input.insufficientMessage, 409);
+	await tx.update(inventory).set({
+		stock: nextStock,
+		updatedAt: input.occurredAt
+	}).where(eq(inventory.variantId, input.variantId));
+	await tx.insert(movements).values({
+		id: crypto.randomUUID(),
+		operationId: input.operationId,
+		variantId: input.variantId,
+		type: input.type,
+		reason: input.reason,
+		quantity: input.quantity,
+		stockBefore: current.stock,
+		stockAfter: nextStock,
+		occurredAt: input.occurredAt
+	});
+}
+async function createOperation(input) {
+	if (input.quantity <= 0 || input.bagQuantity < 0) throw new ErpBusinessError("INVALID_INPUT", "Las cantidades deben ser válidas.", 400);
+	if (input.kind === "PRODUCCION" && !input.operator?.trim()) throw new ErpBusinessError("INVALID_INPUT", "El operario es obligatorio en producción.", 400);
+	return getDb().transaction(async (tx) => {
+		const context = await getVariantContext(tx, input.productId, input.variantId);
+		if (!context) throw new ErpBusinessError("NOT_FOUND", "El producto o la variante no existe.", 404);
+		if (context.requiresColor && !context.color) throw new ErpBusinessError("INVALID_INPUT", "Debes seleccionar un color.", 400);
+		const operationId = crypto.randomUUID();
+		const occurredAt = (/* @__PURE__ */ new Date()).toISOString();
+		await tx.insert(operations).values({
+			id: operationId,
+			kind: input.kind,
+			productId: input.productId,
+			variantId: input.variantId,
+			quantity: input.quantity,
+			operator: input.operator?.trim() || null,
+			bagQuantity: input.bagQuantity,
+			operationDate: input.operationDate,
+			notes: input.notes?.trim() || null,
+			createdAt: occurredAt
+		});
+		await applyStockMovement(tx, {
+			operationId,
+			variantId: input.variantId,
+			type: input.kind === "PRODUCCION" ? "ENTRADA" : "SALIDA",
+			reason: input.kind,
+			quantity: input.quantity,
+			occurredAt,
+			insufficientMessage: "Stock insuficiente."
+		});
+		if (input.bagQuantity > 0 && context.bagType) {
+			const bagProductId = context.bagType === "ALTA" ? "prod-bolsa-alta" : "prod-bolsa-baja";
+			const bagVariant = (await tx.select({ variantId: productVariants.id }).from(productVariants).where(eq(productVariants.productId, bagProductId)).limit(1))[0];
+			if (!bagVariant) throw new ErpBusinessError("NOT_FOUND", "No se encontró el inventario de bolsas.", 404);
+			await applyStockMovement(tx, {
+				operationId,
+				variantId: bagVariant.variantId,
+				type: "SALIDA",
+				reason: "CONSUMO_BOLSA",
+				quantity: input.bagQuantity,
+				occurredAt,
+				insufficientMessage: `Stock insuficiente de Bolsas de ${context.bagType === "ALTA" ? "Alta" : "Baja"}.`
+			});
+		}
+		return {
+			operationId,
+			occurredAt
+		};
+	});
+}
+var erp_route_exports = /* @__PURE__ */ __export({
+	erpRouter: () => erpRouter,
+	isPublic: () => true
+}, 1);
+const erpRouter = new Hono();
+var OperationSchema = object$1({
+	kind: _enum(["PRODUCCION", "DESPACHO"]),
+	productId: string$2().trim().min(1),
+	variantId: string$2().trim().min(1),
+	quantity: number$2().int().positive(),
+	operator: string$2().trim().max(120).optional(),
+	bagQuantity: number$2().int().min(0).default(0),
+	operationDate: string$2().regex(/^\d{4}-\d{2}-\d{2}$/),
+	notes: string$2().trim().max(500).optional()
+});
+function errorResponse(c, error$51) {
+	if (error$51 instanceof ErpBusinessError) return c.json(apiFailure(error$51.code, error$51.message), error$51.status);
+	if (error$51 instanceof DatabaseError) {
+		const status = error$51.status === 503 ? 503 : 502;
+		return c.json(apiFailure(error$51.code, "No se pudo acceder a la base de datos."), status);
+	}
+	throw error$51;
+}
+var snapshotHandler = async (c) => {
+	const date$4 = c.req.query("date") ?? (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(date$4)) return c.json(apiFailure("INVALID_INPUT", "La fecha no es válida."), 400);
+	try {
+		return c.json(apiSuccess(await getErpSnapshot(date$4)), 200);
+	} catch (error$51) {
+		return errorResponse(c, error$51);
+	}
+};
+erpRouter.get("", publicRoute, snapshotHandler);
+erpRouter.get("/", publicRoute, snapshotHandler);
+var operationHandler = async (c) => {
+	const parsed = OperationSchema.safeParse(await c.req.json().catch(() => null));
+	if (!parsed.success) return c.json(apiFailure("INVALID_INPUT", "Completa correctamente todos los campos obligatorios."), 400);
+	try {
+		const result = await createOperation(parsed.data);
+		return c.json(apiSuccess(result), 201);
+	} catch (error$51) {
+		return errorResponse(c, error$51);
+	}
+};
+erpRouter.post("/operations", publicRoute, operationHandler);
 var health_route_exports = /* @__PURE__ */ __export({
 	healthRouter: () => healthRouter,
 	isPublic: () => true
@@ -44788,6 +45505,7 @@ try {
 	modules = {
 		"../routes/auth-config.route.ts": auth_config_route_exports,
 		"../routes/email-verification.route.ts": email_verification_route_exports,
+		"../routes/erp.route.ts": erp_route_exports,
 		"../routes/health.route.ts": health_route_exports,
 		"../routes/me.route.ts": me_route_exports,
 		"../routes/storage.route.ts": storage_route_exports,
@@ -44888,7 +45606,9 @@ app.use("/api/*", withSession);
 for (const { path: path$1, router: router$1 } of routeEntries) app.route(path$1, router$1);
 app.onError(onError);
 app.notFound(notFound);
-var create_app_default = app;
-const handler = handle(create_app_default);
-var fc_entry_default = create_app_default;
-export { fc_entry_default as default, handler, logger as n, createAdapterFactory as t };
+serve({
+	fetch: app.fetch,
+	hostname: "0.0.0.0",
+	port: env.SKY_FC_SERVER_PORT
+});
+export { logger as n, createAdapterFactory as t };
