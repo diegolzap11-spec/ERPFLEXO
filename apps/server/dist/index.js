@@ -44912,6 +44912,51 @@ async function getErpSnapshot(date$4) {
 		total: sql`coalesce(sum(${operations.quantity}), 0)`.mapWith(Number),
 		count: sql`count(*)`.mapWith(Number)
 	}).from(operations).where(eq(operations.operationDate, date$4)).groupBy(operations.kind);
+	const registeredOperatorRows = await db$1.selectDistinct({ name: operations.operator }).from(operations).where(eq(operations.kind, "PRODUCCION"));
+	const productionRows = await db$1.select({
+		id: operations.id,
+		operator: operations.operator,
+		quantity: operations.quantity,
+		createdAt: operations.createdAt,
+		productName: products.name,
+		color: productVariants.color
+	}).from(operations).innerJoin(products, eq(products.id, operations.productId)).innerJoin(productVariants, eq(productVariants.id, operations.variantId)).where(and(eq(operations.kind, "PRODUCCION"), eq(operations.operationDate, date$4))).orderBy(desc(operations.createdAt));
+	const operatorMap = /* @__PURE__ */ new Map();
+	for (const row of productionRows) {
+		const name = row.operator?.trim();
+		if (!name) continue;
+		const normalizedName = name.toLocaleLowerCase("es");
+		const current = operatorMap.get(normalizedName) ?? {
+			name,
+			units: 0,
+			records: 0,
+			productKeys: /* @__PURE__ */ new Set(),
+			lastProductionAt: row.createdAt,
+			production: []
+		};
+		current.units += row.quantity;
+		current.records += 1;
+		current.productKeys.add(`${row.productName}:${row.color ?? ""}`);
+		current.production.push({
+			id: row.id,
+			productName: row.productName,
+			color: row.color,
+			quantity: row.quantity,
+			occurredAt: row.createdAt
+		});
+		operatorMap.set(normalizedName, current);
+	}
+	const operatorUnits = Array.from(operatorMap.values()).reduce((sumValue, item) => sumValue + item.units, 0);
+	const operators = Array.from(operatorMap.values()).map((item) => ({
+		name: item.name,
+		units: item.units,
+		records: item.records,
+		products: item.productKeys.size,
+		averagePerRecord: Math.round(item.units / item.records),
+		share: operatorUnits > 0 ? Math.round(item.units / operatorUnits * 100) : 0,
+		lastProductionAt: item.lastProductionAt,
+		production: item.production
+	})).sort((a, b) => b.units - a.units || a.name.localeCompare(b.name, "es"));
 	const items = inventoryRows.map(mapInventoryRow);
 	const production = dayTotals.find((item) => item.kind === "PRODUCCION");
 	const dispatch = dayTotals.find((item) => item.kind === "DESPACHO");
@@ -44919,6 +44964,14 @@ async function getErpSnapshot(date$4) {
 		date: date$4,
 		inventory: items,
 		movements: recentMovements,
+		registeredOperators: registeredOperatorRows.map((row) => row.name?.trim()).filter((name) => Boolean(name)).sort((a, b) => a.localeCompare(b, "es")),
+		operators,
+		operatorDashboard: {
+			activeCount: operators.length,
+			totalUnits: operatorUnits,
+			averagePerOperator: operators.length > 0 ? Math.round(operatorUnits / operators.length) : 0,
+			bestOperator: operators[0]?.name ?? null
+		},
 		dashboard: {
 			totalStock: items.reduce((sumValue, item) => sumValue + item.stock, 0),
 			productionToday: production?.total ?? 0,
