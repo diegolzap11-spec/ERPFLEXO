@@ -16,13 +16,17 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Target,
+  Trophy,
   Truck,
+  UserRound,
+  Users,
   X
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-type View = "dashboard" | "inventory" | "production" | "dispatch" | "movements";
+type View = "dashboard" | "inventory" | "production" | "operators" | "dispatch" | "movements";
 type OperationKind = "PRODUCCION" | "DESPACHO";
 
 type InventoryItem = {
@@ -57,10 +61,37 @@ type Movement = {
   notes: string | null;
 };
 
+type OperatorProduction = {
+  id: string;
+  productName: string;
+  color: string | null;
+  quantity: number;
+  occurredAt: string;
+};
+
+type OperatorSummary = {
+  name: string;
+  units: number;
+  records: number;
+  products: number;
+  averagePerRecord: number;
+  share: number;
+  lastProductionAt: string;
+  production: OperatorProduction[];
+};
+
 type Snapshot = {
   date: string;
   inventory: InventoryItem[];
   movements: Movement[];
+  registeredOperators: string[];
+  operators: OperatorSummary[];
+  operatorDashboard: {
+    activeCount: number;
+    totalUnits: number;
+    averagePerOperator: number;
+    bestOperator: string | null;
+  };
   dashboard: {
     totalStock: number;
     productionToday: number;
@@ -79,6 +110,7 @@ const navigation: Array<{ id: View; label: string; icon: typeof CircleGauge }> =
   { id: "dashboard", label: "Dashboard", icon: CircleGauge },
   { id: "inventory", label: "Inventario", icon: Boxes },
   { id: "production", label: "Producción", icon: Factory },
+  { id: "operators", label: "Operarios", icon: Users },
   { id: "dispatch", label: "Despachos", icon: Truck },
   { id: "movements", label: "Movimientos", icon: ClipboardList }
 ];
@@ -87,6 +119,7 @@ const viewTitles: Record<View, { title: string; subtitle: string }> = {
   dashboard: { title: "Centro de control", subtitle: "Resumen operativo y alertas de inventario" },
   inventory: { title: "Inventario", subtitle: "Stock disponible por producto y variante" },
   production: { title: "Registrar producción", subtitle: "Las cantidades producidas se suman automáticamente" },
+  operators: { title: "Rendimiento de operarios", subtitle: "Seguimiento de producción por persona y fecha operativa" },
   dispatch: { title: "Registrar despacho", subtitle: "Las cantidades despachadas se descuentan con validación" },
   movements: { title: "Movimientos", subtitle: "Trazabilidad de todas las entradas y salidas" }
 };
@@ -186,8 +219,9 @@ const Index = () => {
           )}
           {data && view === "inventory" && <InventoryView items={data.inventory} />}
           {data && view === "production" && (
-            <OperationForm kind="PRODUCCION" items={data.inventory} businessDate={businessDate} />
+            <OperationForm kind="PRODUCCION" items={data.inventory} businessDate={businessDate} operators={data.registeredOperators} />
           )}
+          {data && view === "operators" && <OperatorsView data={data} onNavigate={setView} />}
           {data && view === "dispatch" && (
             <OperationForm kind="DESPACHO" items={data.inventory} businessDate={businessDate} />
           )}
@@ -214,9 +248,12 @@ function Sidebar({
     <>
       {open && <button className="nav-scrim" aria-label="Cerrar menú" onClick={onClose} />}
       <aside className={`sidebar ${open ? "sidebar-open" : ""}`}>
+        {/* @section: flexoimpress-brand */}
         <div className="brand-lockup">
-          <div className="brand-mark">F</div>
-          <div><strong>Flexoimpress</strong><span>Inventory ERP</span></div>
+          <div className="brand-identity">
+            <img src="/brand/flexoimpress-logo-dark.png" alt="Flexoimpress" />
+            <span>Control operativo ERP</span>
+          </div>
           <button className="icon-button close-nav" type="button" aria-label="Cerrar menú" onClick={onClose}><X size={18} /></button>
         </div>
         <nav aria-label="Navegación principal">
@@ -288,6 +325,11 @@ function Dashboard({ data, onNavigate }: { data: Snapshot; onNavigate: (view: Vi
           <button className="quick-action production" type="button" onClick={() => onNavigate("production")}>
             <span className="quick-icon"><Factory size={23} /></span>
             <span><strong>Nueva producción</strong><small>Sumar unidades al inventario</small></span>
+            <ArrowUpRight size={20} />
+          </button>
+          <button className="quick-action operators" type="button" onClick={() => onNavigate("operators")}>
+            <span className="quick-icon"><Users size={23} /></span>
+            <span><strong>Ver operarios</strong><small>Revisar producción y rendimiento</small></span>
             <ArrowUpRight size={20} />
           </button>
           <button className="quick-action dispatch" type="button" onClick={() => onNavigate("dispatch")}>
@@ -455,7 +497,17 @@ function InventoryView({ items }: { items: InventoryItem[] }) {
 }
 
 /* @section: operation-form */
-function OperationForm({ kind, items, businessDate }: { kind: OperationKind; items: InventoryItem[]; businessDate: string }) {
+function OperationForm({
+  kind,
+  items,
+  businessDate,
+  operators = []
+}: {
+  kind: OperationKind;
+  items: InventoryItem[];
+  businessDate: string;
+  operators?: string[];
+}) {
   const queryClient = useQueryClient();
   const productGroups = useMemo(() => {
     const map = new Map<string, InventoryItem[]>();
@@ -543,7 +595,21 @@ function OperationForm({ kind, items, businessDate }: { kind: OperationKind; ite
               <label className="field"><span>Presentación</span><input value="Estándar" disabled /></label>
             )}
             <label className="field"><span>Cantidad *</span><input type="number" min="1" step="1" inputMode="numeric" value={quantity} onChange={(event) => setQuantity(event.target.value)} placeholder="0" /></label>
-            {kind === "PRODUCCION" && <label className="field"><span>Operario *</span><input value={operator} onChange={(event) => setOperator(event.target.value)} placeholder="Nombre del operario" /></label>}
+            {kind === "PRODUCCION" && (
+              <label className="field">
+                <span>Operario *</span>
+                <input
+                  list="registered-operators"
+                  value={operator}
+                  onChange={(event) => setOperator(event.target.value)}
+                  placeholder="Selecciona o escribe un nombre"
+                />
+                <datalist id="registered-operators">
+                  {operators.map((name) => <option key={name} value={name} />)}
+                </datalist>
+                <small className="field-hint">Los nombres usados quedan disponibles para el seguimiento de producción.</small>
+              </label>
+            )}
             {selectedItem?.bagType && (
               <label className="field"><span>Bolsas utilizadas ({selectedItem.bagType === "ALTA" ? "Alta" : "Baja"})</span><input type="number" min="0" step="1" inputMode="numeric" value={bagQuantity} onChange={(event) => setBagQuantity(event.target.value)} /></label>
             )}
@@ -573,6 +639,94 @@ function OperationForm({ kind, items, businessDate }: { kind: OperationKind; ite
         <article className="integrity-card"><ShieldCheck size={22} /><div><strong>Control de integridad</strong><span>No se permite stock negativo y cada cambio queda registrado.</span></div></article>
       </aside>
     </div>
+  );
+}
+
+/* @section: operators-production-monitor */
+function OperatorsView({ data, onNavigate }: { data: Snapshot; onNavigate: (view: View) => void }) {
+  const [search, setSearch] = useState("");
+  const filtered = data.operators.filter((operator) => operator.name.toLowerCase().includes(search.toLowerCase()));
+  const maxUnits = Math.max(...data.operators.map((operator) => operator.units), 1);
+
+  return (
+    <div className="view-stack animate-in operators-view">
+      <section className="operator-metric-grid" aria-label="Indicadores de producción de operarios">
+        <OperatorMetric icon={Users} label="Operarios activos" value={data.operatorDashboard.activeCount} detail="con producción registrada" />
+        <OperatorMetric icon={Factory} label="Producción registrada" value={data.operatorDashboard.totalUnits} detail="unidades en la fecha" />
+        <OperatorMetric icon={Target} label="Promedio por operario" value={data.operatorDashboard.averagePerOperator} detail="unidades producidas" />
+        <OperatorMetric icon={Trophy} label="Mayor producción" value={data.operatorDashboard.bestOperator ?? "Sin registros"} detail="según la fecha operativa" textValue />
+      </section>
+
+      <section className="toolbar-panel operator-toolbar">
+        <label className="search-control"><Search size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar operario" /></label>
+        <div className="operator-date-context"><span>Seguimiento del</span><strong>{new Intl.DateTimeFormat("es-PE", { dateStyle: "long" }).format(new Date(`${data.date}T12:00:00`))}</strong></div>
+        <button className="primary-button" type="button" onClick={() => onNavigate("production")}><Factory size={17} /> Registrar producción</button>
+      </section>
+
+      {filtered.length === 0 ? (
+        <section className="panel operator-empty">
+          <UserRound size={32} />
+          <h2>{search ? "No encontramos ese operario" : "Aún no hay producción registrada"}</h2>
+          <p>{search ? "Prueba con otro nombre o limpia la búsqueda." : "Los operarios aparecerán aquí automáticamente cuando registres su primera producción para esta fecha."}</p>
+          {!search && <button className="primary-button" type="button" onClick={() => onNavigate("production")}><Factory size={17} /> Registrar primera producción</button>}
+        </section>
+      ) : (
+        <section className="operator-grid" aria-live="polite">
+          {filtered.map((operator, index) => (
+            <article className="panel operator-card" key={operator.name}>
+              <div className="operator-card-head">
+                <div className="operator-avatar">{operator.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</div>
+                <div className="operator-name"><span>Operario {data.operators.indexOf(operator) + 1}</span><h2>{operator.name}</h2></div>
+                <span className={`operator-rank ${index === 0 && !search ? "leader" : ""}`}>{index === 0 && !search ? <><Trophy size={14} /> Mayor producción</> : `${operator.share}% del total`}</span>
+              </div>
+
+              <div className="operator-output">
+                <div><span>Unidades producidas</span><strong>{formatNumber(operator.units)}</strong></div>
+                <div className="operator-progress" aria-label={`${operator.share}% de la producción total`}><span style={{ width: `${Math.max(4, Math.round((operator.units / maxUnits) * 100))}%` }} /></div>
+              </div>
+
+              <div className="operator-stats">
+                <div><span>Registros</span><strong>{formatNumber(operator.records)}</strong></div>
+                <div><span>Productos</span><strong>{formatNumber(operator.products)}</strong></div>
+                <div><span>Promedio</span><strong>{formatNumber(operator.averagePerRecord)} u.</strong></div>
+              </div>
+
+              <div className="operator-history">
+                <div className="operator-history-title"><span>Producción reciente</span><small>{formatDateTime(operator.lastProductionAt)}</small></div>
+                {operator.production.slice(0, 3).map((record) => (
+                  <div className="operator-production-row" key={record.id}>
+                    <span className="production-dot" />
+                    <div><strong>{record.productName}</strong><small>{record.color ?? "Presentación estándar"} · {formatDateTime(record.occurredAt)}</small></div>
+                    <strong>+{formatNumber(record.quantity)}</strong>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ))}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function OperatorMetric({
+  icon: Icon,
+  label,
+  value,
+  detail,
+  textValue = false
+}: {
+  icon: typeof Users;
+  label: string;
+  value: number | string;
+  detail: string;
+  textValue?: boolean;
+}) {
+  return (
+    <article className="operator-metric">
+      <span className="operator-metric-icon"><Icon size={20} /></span>
+      <div><span>{label}</span><strong className={textValue ? "text-value" : ""}>{typeof value === "number" ? formatNumber(value) : value}</strong><small>{detail}</small></div>
+    </article>
   );
 }
 

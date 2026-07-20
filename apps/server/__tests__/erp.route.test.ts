@@ -31,6 +31,9 @@ async function snapshot() {
     data: {
       inventory: Array<{ id: string; stock: number }>;
       movements: Array<{ type: string; reason: string; quantity: number; stockBefore: number; stockAfter: number }>;
+      registeredOperators: string[];
+      operators: Array<{ name: string; units: number; records: number; products: number; averagePerRecord: number; share: number }>;
+      operatorDashboard: { activeCount: number; totalUnits: number; averagePerOperator: number; bestOperator: string | null };
       dashboard: { totalStock: number; productionToday: number; dispatchToday: number };
     };
   };
@@ -64,6 +67,21 @@ describe("Flexoimpress ERP inventory transactions", () => {
       quantity: 120,
       stockBefore: 0,
       stockAfter: 120
+    });
+    expect(state.data.registeredOperators).toContain("Juan Pérez");
+    expect(state.data.operators[0]).toMatchObject({
+      name: "Juan Pérez",
+      units: 120,
+      records: 1,
+      products: 1,
+      averagePerRecord: 120,
+      share: 100
+    });
+    expect(state.data.operatorDashboard).toEqual({
+      activeCount: 1,
+      totalUnits: 120,
+      averagePerOperator: 120,
+      bestOperator: "Juan Pérez"
     });
   });
 
