@@ -1,0 +1,1 @@
+{"files": [], "references": [{"path": "./apps/client/tsconfig.app.json"}], "compilerOptions": {"noUnusedParameters": false, "skipLibCheck": true, "allowJs": true, "noUnusedLocals": false, "strict": false}}

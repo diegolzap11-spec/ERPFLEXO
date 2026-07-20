@@ -18,10 +18,13 @@ vi.mock("@libsql/client/web", async () => {
   return await import("@libsql/client");
 });
 
-const TEST_DB_URL = ":memory:";
+// Route auto-discovery can instantiate the DB module more than once under
+// Vitest. A process-scoped file lets every client in the same worker share the
+// exact database, unlike :memory: where each client receives an isolated DB.
+const TEST_DB_URL = `file:/tmp/flexoimpress-erp-test-${process.pid}.sqlite`;
 
 // Use ??= so an external runner can override (e.g. point at a Docker
-// libsql-server for the Phase 0 :memory: vs production comparison experiment).
+// libsql-server for the Phase 0 local-vs-production comparison experiment).
 process.env.SKYBASE_DB_ENDPOINT ??= TEST_DB_URL;
 process.env.SKYBASE_DB_TOKEN ??= "test-token";
 process.env.SKYBASE_DB_NAMESPACE ??= "test-ns";
