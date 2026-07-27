@@ -30,10 +30,33 @@ async function snapshot() {
   return (await response.json()) as {
     data: {
       inventory: Array<{ id: string; stock: number }>;
-      movements: Array<{ type: string; reason: string; quantity: number; stockBefore: number; stockAfter: number }>;
+      movements: Array<{ type: string; reason: string; quantity: number; stockBefore: number; stockAfter: number; operator: string | null }>;
       registeredOperators: string[];
-      operators: Array<{ name: string; units: number; records: number; products: number; averagePerRecord: number; share: number }>;
-      operatorDashboard: { activeCount: number; totalUnits: number; averagePerOperator: number; bestOperator: string | null };
+      operators: Array<{
+        name: string;
+        units: number;
+        records: number;
+        products: number;
+        averagePerRecord: number;
+        share: number;
+        dispatchUnits: number;
+        dispatchRecords: number;
+        bagConsumptionUnits: number;
+        bagConsumptionRecords: number;
+        outputUnits: number;
+        balance: number;
+        activity: Array<{ reason: string; quantity: number; type: string }>;
+      }>;
+      operatorDashboard: {
+        activeCount: number;
+        totalUnits: number;
+        totalDispatchUnits: number;
+        totalBagConsumptionUnits: number;
+        totalOutputUnits: number;
+        netBalance: number;
+        averagePerOperator: number;
+        bestOperator: string | null;
+      };
       dashboard: { totalStock: number; productionToday: number; dispatchToday: number };
     };
   };
@@ -80,6 +103,10 @@ describe("Flexoimpress ERP inventory transactions", () => {
     expect(state.data.operatorDashboard).toEqual({
       activeCount: 1,
       totalUnits: 120,
+      totalDispatchUnits: 0,
+      totalBagConsumptionUnits: 0,
+      totalOutputUnits: 0,
+      netBalance: 120,
       averagePerOperator: 120,
       bestOperator: "Juan Pérez"
     });
@@ -91,7 +118,7 @@ describe("Flexoimpress ERP inventory transactions", () => {
       ...production,
       kind: "DESPACHO",
       quantity: 45,
-      operator: undefined,
+      operator: "María López",
       notes: "Entrega parcial"
     });
     expect(response.status).toBe(201);
@@ -105,8 +132,38 @@ describe("Flexoimpress ERP inventory transactions", () => {
       reason: "DESPACHO",
       quantity: 45,
       stockBefore: 120,
-      stockAfter: 75
+      stockAfter: 75,
+      operator: "María López"
     });
+    expect(state.data.registeredOperators).toEqual(expect.arrayContaining(["Juan Pérez", "María López"]));
+    expect(state.data.operators.find((item) => item.name === "María López")).toMatchObject({
+      units: 0,
+      dispatchUnits: 45,
+      dispatchRecords: 1,
+      bagConsumptionUnits: 0,
+      outputUnits: 45,
+      balance: -45
+    });
+    expect(state.data.operatorDashboard).toMatchObject({
+      activeCount: 2,
+      totalDispatchUnits: 45,
+      totalOutputUnits: 45,
+      netBalance: 75
+    });
+  });
+
+  it("rejects operations without an operator before changing inventory", async () => {
+    const response = await postOperation({
+      ...production,
+      kind: "DESPACHO",
+      operator: undefined,
+      quantity: 1
+    });
+    expect(response.status).toBe(400);
+
+    const state = await snapshot();
+    expect(state.data.inventory.find((row) => row.id === "var-mascarilla-as")?.stock).toBe(0);
+    expect(state.data.movements).toHaveLength(0);
   });
 
   it("rejects a dispatch above available stock without changing inventory", async () => {
@@ -114,7 +171,7 @@ describe("Flexoimpress ERP inventory transactions", () => {
       ...production,
       kind: "DESPACHO",
       quantity: 1,
-      operator: undefined
+      operator: "María López"
     });
     expect(response.status).toBe(409);
     const payload = (await response.json()) as { error?: { message?: string } };
@@ -146,6 +203,20 @@ describe("Flexoimpress ERP inventory transactions", () => {
     const state = await snapshot();
     expect(state.data.inventory.find((row) => row.id === "var-cj-naranja")?.stock).toBe(25);
     expect(state.data.inventory.find((row) => row.id === "var-bolsa-alta")?.stock).toBe(8);
-    expect(state.data.movements.some((movement) => movement.reason === "CONSUMO_BOLSA" && movement.quantity === 2)).toBe(true);
+    expect(state.data.movements).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: "PRODUCCION", quantity: 25, operator: "Juan Pérez" }),
+      expect.objectContaining({ reason: "CONSUMO_BOLSA", quantity: 2, operator: "Juan Pérez" })
+    ]));
+    const operator = state.data.operators.find((item) => item.name === "Juan Pérez");
+    expect(operator).toMatchObject({
+      bagConsumptionUnits: 2,
+      bagConsumptionRecords: 1,
+      outputUnits: 2,
+      balance: 33
+    });
+    expect(operator?.activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: "PRODUCCION", quantity: 25, type: "ENTRADA" }),
+      expect.objectContaining({ reason: "CONSUMO_BOLSA", quantity: 2, type: "SALIDA" })
+    ]));
   });
 });

@@ -69,6 +69,12 @@ type OperatorProduction = {
   occurredAt: string;
 };
 
+type OperatorActivity = OperatorProduction & {
+  operationId: string;
+  type: "ENTRADA" | "SALIDA";
+  reason: "PRODUCCION" | "DESPACHO" | "CONSUMO_BOLSA";
+};
+
 type OperatorSummary = {
   name: string;
   units: number;
@@ -76,8 +82,16 @@ type OperatorSummary = {
   products: number;
   averagePerRecord: number;
   share: number;
-  lastProductionAt: string;
+  lastProductionAt: string | null;
+  lastActivityAt: string;
+  dispatchUnits: number;
+  dispatchRecords: number;
+  bagConsumptionUnits: number;
+  bagConsumptionRecords: number;
+  outputUnits: number;
+  balance: number;
   production: OperatorProduction[];
+  activity: OperatorActivity[];
 };
 
 type Snapshot = {
@@ -89,6 +103,10 @@ type Snapshot = {
   operatorDashboard: {
     activeCount: number;
     totalUnits: number;
+    totalDispatchUnits: number;
+    totalBagConsumptionUnits: number;
+    totalOutputUnits: number;
+    netBalance: number;
     averagePerOperator: number;
     bestOperator: string | null;
   };
@@ -119,7 +137,7 @@ const viewTitles: Record<View, { title: string; subtitle: string }> = {
   dashboard: { title: "Centro de control", subtitle: "Resumen operativo y alertas de inventario" },
   inventory: { title: "Inventario", subtitle: "Stock disponible por producto y variante" },
   production: { title: "Registrar producción", subtitle: "Las cantidades producidas se suman automáticamente" },
-  operators: { title: "Rendimiento de operarios", subtitle: "Seguimiento de producción por persona y fecha operativa" },
+  operators: { title: "Actividad de operarios", subtitle: "Producción, despachos y consumo de bolsas por responsable" },
   dispatch: { title: "Registrar despacho", subtitle: "Las cantidades despachadas se descuentan con validación" },
   movements: { title: "Movimientos", subtitle: "Trazabilidad de todas las entradas y salidas" }
 };
@@ -269,9 +287,9 @@ const Index = () => {
           )}
           {data && view === "operators" && <OperatorsView data={data} onNavigate={setView} />}
           {data && view === "dispatch" && (
-            <OperationForm kind="DESPACHO" items={data.inventory} businessDate={businessDate} />
+            <OperationForm kind="DESPACHO" items={data.inventory} businessDate={businessDate} operators={data.registeredOperators} />
           )}
-          {data && view === "movements" && <MovementsView movements={data.movements} />}
+          {data && view === "movements" && <MovementsView movements={data.movements} operators={data.registeredOperators} />}
         </main>
       </div>
     </div>
@@ -375,7 +393,7 @@ function Dashboard({ data, onNavigate }: { data: Snapshot; onNavigate: (view: Vi
           </button>
           <button className="quick-action operators" type="button" onClick={() => onNavigate("operators")}>
             <span className="quick-icon"><Users size={23} /></span>
-            <span><strong>Ver operarios</strong><small>Revisar producción y rendimiento</small></span>
+            <span><strong>Ver operarios</strong><small>Revisar producción, salidas y balance</small></span>
             <ArrowUpRight size={20} />
           </button>
           <button className="quick-action dispatch" type="button" onClick={() => onNavigate("dispatch")}>
@@ -589,8 +607,8 @@ function OperationForm({
           productId,
           variantId,
           quantity: Number(quantity),
-          operator: kind === "PRODUCCION" ? operator : undefined,
-          bagQuantity: Number(bagQuantity || 0),
+          operator,
+          bagQuantity: kind === "PRODUCCION" ? Number(bagQuantity || 0) : 0,
           operationDate,
           notes: notes || undefined
         })
@@ -606,7 +624,7 @@ function OperationForm({
       setQuantity("");
       setBagQuantity("0");
       setNotes("");
-      if (kind === "PRODUCCION") setOperator("");
+      setOperator("");
       await queryClient.invalidateQueries({ queryKey: ["erp-snapshot"] });
     },
     onError: (error) => toast.error(error.message)
@@ -617,7 +635,7 @@ function OperationForm({
       ? selectedItem.stock + (Number(quantity) || 0)
       : selectedItem.stock - (Number(quantity) || 0)
     : 0;
-  const canSubmit = Boolean(productId && variantId && Number(quantity) > 0 && operationDate && (kind === "DESPACHO" || operator.trim()));
+  const canSubmit = Boolean(productId && variantId && Number(quantity) > 0 && operationDate && operator.trim());
 
   return (
     <div className="operation-layout animate-in">
@@ -641,22 +659,20 @@ function OperationForm({
               <label className="field"><span>Presentación</span><input value="Estándar" disabled /></label>
             )}
             <label className="field"><span>Cantidad *</span><input type="number" min="1" step="1" inputMode="numeric" value={quantity} onChange={(event) => setQuantity(event.target.value)} placeholder="0" /></label>
-            {kind === "PRODUCCION" && (
-              <label className="field">
-                <span>Operario *</span>
-                <input
-                  list="registered-operators"
-                  value={operator}
-                  onChange={(event) => setOperator(event.target.value)}
-                  placeholder="Selecciona o escribe un nombre"
-                />
-                <datalist id="registered-operators">
-                  {operators.map((name) => <option key={name} value={name} />)}
-                </datalist>
-                <small className="field-hint">Los nombres usados quedan disponibles para el seguimiento de producción.</small>
-              </label>
-            )}
-            {selectedItem?.bagType && (
+            <label className="field">
+              <span>Operario responsable *</span>
+              <input
+                list={`registered-operators-${kind.toLowerCase()}`}
+                value={operator}
+                onChange={(event) => setOperator(event.target.value)}
+                placeholder="Selecciona o escribe un nombre"
+              />
+              <datalist id={`registered-operators-${kind.toLowerCase()}`}>
+                {operators.map((name) => <option key={name} value={name} />)}
+              </datalist>
+              <small className="field-hint">Se atribuirán a este operario todos los movimientos generados por la operación.</small>
+            </label>
+            {kind === "PRODUCCION" && selectedItem?.bagType && (
               <label className="field"><span>Bolsas utilizadas ({selectedItem.bagType === "ALTA" ? "Alta" : "Baja"})</span><input type="number" min="0" step="1" inputMode="numeric" value={bagQuantity} onChange={(event) => setBagQuantity(event.target.value)} /></label>
             )}
             <label className="field"><span>Fecha *</span><input type="date" value={operationDate} onChange={(event) => setOperationDate(event.target.value)} /></label>
@@ -680,7 +696,7 @@ function OperationForm({
           </div>
           <div className={`new-stock ${newStock < 0 ? "invalid" : ""}`}><span>Stock resultante</span><strong>{formatNumber(newStock)}</strong></div>
           {newStock < 0 && <div className="inline-warning"><AlertTriangle size={17} /><span>Stock insuficiente. La operación será cancelada.</span></div>}
-          {Number(bagQuantity) > 0 && selectedItem?.bagType && <div className="bag-note"><PackageCheck size={17} /><span>Se descontarán automáticamente {formatNumber(Number(bagQuantity))} Bolsas de {selectedItem.bagType === "ALTA" ? "Alta" : "Baja"}.</span></div>}
+          {kind === "PRODUCCION" && Number(bagQuantity) > 0 && selectedItem?.bagType && <div className="bag-note"><PackageCheck size={17} /><span>Se descontarán automáticamente {formatNumber(Number(bagQuantity))} Bolsas de {selectedItem.bagType === "ALTA" ? "Alta" : "Baja"} y quedarán atribuidas al mismo operario.</span></div>}
         </article>
         <article className="integrity-card"><ShieldCheck size={22} /><div><strong>Control de integridad</strong><span>No se permite stock negativo y cada cambio queda registrado.</span></div></article>
       </aside>
@@ -688,7 +704,7 @@ function OperationForm({
   );
 }
 
-/* @section: operators-production-monitor */
+/* @section: operators-activity-monitor */
 function OperatorsView({ data, onNavigate }: { data: Snapshot; onNavigate: (view: View) => void }) {
   const [search, setSearch] = useState("");
   const filtered = data.operators.filter((operator) => operator.name.toLowerCase().includes(search.toLowerCase()));
@@ -696,15 +712,17 @@ function OperatorsView({ data, onNavigate }: { data: Snapshot; onNavigate: (view
 
   return (
     <div className="view-stack animate-in operators-view">
-      <section className="operator-metric-grid" aria-label="Indicadores de producción de operarios">
-        <OperatorMetric icon={Users} label="Operarios activos" value={data.operatorDashboard.activeCount} detail="con producción registrada" />
-        <OperatorMetric icon={Factory} label="Producción registrada" value={data.operatorDashboard.totalUnits} detail="unidades en la fecha" />
+      <section className="operator-metric-grid" aria-label="Indicadores de actividad de operarios">
+        <OperatorMetric icon={Users} label="Operarios activos" value={data.operatorDashboard.activeCount} detail="con movimientos en la fecha" />
+        <OperatorMetric icon={Factory} label="Producción registrada" value={data.operatorDashboard.totalUnits} detail="unidades producidas" />
+        <OperatorMetric icon={Truck} label="Despachos registrados" value={data.operatorDashboard.totalDispatchUnits} detail="unidades retiradas" />
+        <OperatorMetric icon={PackageCheck} label="Bolsas consumidas" value={data.operatorDashboard.totalBagConsumptionUnits} detail="salidas automáticas" />
         <OperatorMetric icon={Target} label="Promedio por operario" value={data.operatorDashboard.averagePerOperator} detail="unidades producidas" />
         <OperatorMetric icon={Trophy} label="Mayor producción" value={data.operatorDashboard.bestOperator ?? "Sin registros"} detail="según la fecha operativa" textValue />
       </section>
 
       <section className="toolbar-panel operator-toolbar">
-        <label className="search-control"><Search size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar operario" /></label>
+        <label className="search-control"><Search size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filtrar información por operario" /></label>
         <div className="operator-date-context"><span>Seguimiento del</span><strong>{new Intl.DateTimeFormat("es-PE", { dateStyle: "long" }).format(new Date(`${data.date}T12:00:00`))}</strong></div>
         <button className="primary-button" type="button" onClick={() => onNavigate("production")}><Factory size={17} /> Registrar producción</button>
       </section>
@@ -712,43 +730,49 @@ function OperatorsView({ data, onNavigate }: { data: Snapshot; onNavigate: (view
       {filtered.length === 0 ? (
         <section className="panel operator-empty">
           <UserRound size={32} />
-          <h2>{search ? "No encontramos ese operario" : "Aún no hay producción registrada"}</h2>
-          <p>{search ? "Prueba con otro nombre o limpia la búsqueda." : "Los operarios aparecerán aquí automáticamente cuando registres su primera producción para esta fecha."}</p>
+          <h2>{search ? "No encontramos ese operario" : "Aún no hay actividad registrada"}</h2>
+          <p>{search ? "Prueba con otro nombre o limpia la búsqueda." : "Los operarios aparecerán aquí cuando registres una producción o un despacho para esta fecha."}</p>
           {!search && <button className="primary-button" type="button" onClick={() => onNavigate("production")}><Factory size={17} /> Registrar primera producción</button>}
         </section>
       ) : (
         <section className="operator-grid" aria-live="polite">
-          {filtered.map((operator, index) => (
-            <article className="panel operator-card" key={operator.name}>
-              <div className="operator-card-head">
-                <div className="operator-avatar">{operator.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</div>
-                <div className="operator-name"><span>Operario {data.operators.indexOf(operator) + 1}</span><h2>{operator.name}</h2></div>
-                <span className={`operator-rank ${index === 0 && !search ? "leader" : ""}`}>{index === 0 && !search ? <><Trophy size={14} /> Mayor producción</> : `${operator.share}% del total`}</span>
-              </div>
+          {filtered.map((operator) => {
+            const isLeader = operator.name === data.operatorDashboard.bestOperator && operator.units > 0;
+            return (
+              <article className="panel operator-card" key={operator.name}>
+                <div className="operator-card-head">
+                  <div className="operator-avatar">{operator.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase()}</div>
+                  <div className="operator-name"><span>Responsable de operación</span><h2>{operator.name}</h2></div>
+                  <span className={`operator-rank ${isLeader ? "leader" : ""}`}>{isLeader ? <><Trophy size={14} /> Mayor producción</> : `${operator.share}% de producción`}</span>
+                </div>
 
-              <div className="operator-output">
-                <div><span>Unidades producidas</span><strong>{formatNumber(operator.units)}</strong></div>
-                <div className="operator-progress" aria-label={`${operator.share}% de la producción total`}><span style={{ width: `${Math.max(4, Math.round((operator.units / maxUnits) * 100))}%` }} /></div>
-              </div>
+                <div className="operator-output">
+                  <div><span>Balance producción − salidas</span><strong className={operator.balance >= 0 ? "positive" : "negative"}>{operator.balance >= 0 ? "+" : ""}{formatNumber(operator.balance)}</strong></div>
+                  <div className="operator-progress" aria-label={`${operator.share}% de la producción total`}><span style={{ width: `${operator.units === 0 ? 0 : Math.max(4, Math.round((operator.units / maxUnits) * 100))}%` }} /></div>
+                </div>
 
-              <div className="operator-stats">
-                <div><span>Registros</span><strong>{formatNumber(operator.records)}</strong></div>
-                <div><span>Productos</span><strong>{formatNumber(operator.products)}</strong></div>
-                <div><span>Promedio</span><strong>{formatNumber(operator.averagePerRecord)} u.</strong></div>
-              </div>
+                <div className="operator-stats">
+                  <div><span>Producción</span><strong className="positive">+{formatNumber(operator.units)}</strong></div>
+                  <div><span>Despachos</span><strong className="negative">−{formatNumber(operator.dispatchUnits)}</strong></div>
+                  <div><span>Consumo bolsas</span><strong className="negative">−{formatNumber(operator.bagConsumptionUnits)}</strong></div>
+                  <div><span>Reg. producción</span><strong>{formatNumber(operator.records)}</strong></div>
+                  <div><span>Reg. salidas</span><strong>{formatNumber(operator.dispatchRecords + operator.bagConsumptionRecords)}</strong></div>
+                  <div><span>Promedio</span><strong>{formatNumber(operator.averagePerRecord)} u.</strong></div>
+                </div>
 
-              <div className="operator-history">
-                <div className="operator-history-title"><span>Producción reciente</span><small>{formatDateTime(operator.lastProductionAt)}</small></div>
-                {operator.production.slice(0, 3).map((record) => (
-                  <div className="operator-production-row" key={record.id}>
-                    <span className="production-dot" />
-                    <div><strong>{record.productName}</strong><small>{record.color ?? "Presentación estándar"} · {formatDateTime(record.occurredAt)}</small></div>
-                    <strong>+{formatNumber(record.quantity)}</strong>
-                  </div>
-                ))}
-              </div>
-            </article>
-          ))}
+                <div className="operator-history">
+                  <div className="operator-history-title"><span>Actividad reciente</span><small>{formatDateTime(operator.lastActivityAt)}</small></div>
+                  {operator.activity.slice(0, 5).map((record) => (
+                    <div className="operator-production-row" key={record.id}>
+                      <span className={`production-dot ${record.type === "SALIDA" ? "output-dot" : ""}`} />
+                      <div><strong>{record.productName}</strong><small>{record.reason.replace("_", " ")} · {record.color ?? "Presentación estándar"} · {formatDateTime(record.occurredAt)}</small></div>
+                      <strong className={record.type === "ENTRADA" ? "positive" : "negative"}>{record.type === "ENTRADA" ? "+" : "−"}{formatNumber(record.quantity)}</strong>
+                    </div>
+                  ))}
+                </div>
+              </article>
+            );
+          })}
         </section>
       )}
     </div>
@@ -777,19 +801,37 @@ function OperatorMetric({
 }
 
 /* @section: movements-view */
-function MovementsView({ movements }: { movements: Movement[] }) {
+function MovementsView({ movements, operators }: { movements: Movement[]; operators: string[] }) {
   const [search, setSearch] = useState("");
   const [type, setType] = useState<"ALL" | "ENTRADA" | "SALIDA">("ALL");
+  const [operator, setOperator] = useState("ALL");
+  const operatorOptions = useMemo(() => {
+    const names = new Map<string, string>();
+    [...operators, ...movements.map((movement) => movement.operator).filter((name): name is string => Boolean(name))].forEach((name) => {
+      const trimmed = name.trim();
+      if (trimmed) names.set(trimmed.toLocaleLowerCase("es"), trimmed);
+    });
+    return Array.from(names.values()).sort((a, b) => a.localeCompare(b, "es"));
+  }, [movements, operators]);
   const filtered = movements.filter((movement) => {
     const matchesType = type === "ALL" || movement.type === type;
+    const matchesOperator = operator === "ALL" || movement.operator?.trim().toLocaleLowerCase("es") === operator;
     const haystack = `${movement.productName} ${movement.color ?? ""} ${movement.operator ?? ""} ${movement.reason}`.toLowerCase();
-    return matchesType && haystack.includes(search.toLowerCase());
+    return matchesType && matchesOperator && haystack.includes(search.toLowerCase());
   });
 
   return (
     <div className="view-stack animate-in">
-      <section className="toolbar-panel">
+      {/* @section: movements-operator-filter */}
+      <section className="toolbar-panel movements-toolbar">
         <label className="search-control"><Search size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar en movimientos" /></label>
+        <label className="operator-filter-control">
+          <span>Operario</span>
+          <select value={operator} onChange={(event) => setOperator(event.target.value)} aria-label="Filtrar movimientos por operario">
+            <option value="ALL">Todos los operarios</option>
+            {operatorOptions.map((name) => <option key={name} value={name.toLocaleLowerCase("es")}>{name}</option>)}
+          </select>
+        </label>
         <div className="filter-tabs" role="group" aria-label="Filtrar movimientos">
           <button className={type === "ALL" ? "active" : ""} onClick={() => setType("ALL")} type="button">Todos</button>
           <button className={type === "ENTRADA" ? "active" : ""} onClick={() => setType("ENTRADA")} type="button">Entradas</button>

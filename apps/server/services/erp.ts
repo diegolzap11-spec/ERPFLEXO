@@ -116,37 +116,57 @@ export async function getErpSnapshot(date: string) {
     .where(eq(operations.operationDate, date))
     .groupBy(operations.kind);
 
-  /* @section: operator-production-analytics */
+  /* @section: operator-movement-analytics */
   const registeredOperatorRows = await db
     .selectDistinct({ name: operations.operator })
-    .from(operations)
-    .where(eq(operations.kind, "PRODUCCION"));
+    .from(operations);
 
-  const productionRows = await db
+  const operatorMovementRows = await db
     .select({
-      id: operations.id,
+      id: movements.id,
+      operationId: operations.id,
       operator: operations.operator,
-      quantity: operations.quantity,
-      createdAt: operations.createdAt,
+      type: movements.type,
+      reason: movements.reason,
+      quantity: movements.quantity,
+      occurredAt: movements.occurredAt,
       productName: products.name,
       color: productVariants.color
     })
-    .from(operations)
-    .innerJoin(products, eq(products.id, operations.productId))
-    .innerJoin(productVariants, eq(productVariants.id, operations.variantId))
-    .where(and(eq(operations.kind, "PRODUCCION"), eq(operations.operationDate, date)))
-    .orderBy(desc(operations.createdAt));
+    .from(movements)
+    .innerJoin(operations, eq(operations.id, movements.operationId))
+    .innerJoin(productVariants, eq(productVariants.id, movements.variantId))
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .where(eq(operations.operationDate, date))
+    .orderBy(desc(movements.occurredAt));
+
+  type OperatorActivity = {
+    id: string;
+    operationId: string;
+    type: "ENTRADA" | "SALIDA";
+    reason: "PRODUCCION" | "DESPACHO" | "CONSUMO_BOLSA";
+    productName: string;
+    color: string | null;
+    quantity: number;
+    occurredAt: string;
+  };
 
   const operatorMap = new Map<string, {
     name: string;
     units: number;
     records: number;
     productKeys: Set<string>;
-    lastProductionAt: string;
+    lastProductionAt: string | null;
+    lastActivityAt: string;
+    dispatchUnits: number;
+    dispatchRecords: number;
+    bagConsumptionUnits: number;
+    bagConsumptionRecords: number;
     production: Array<{ id: string; productName: string; color: string | null; quantity: number; occurredAt: string }>;
+    activity: OperatorActivity[];
   }>();
 
-  for (const row of productionRows) {
+  for (const row of operatorMovementRows) {
     const name = row.operator?.trim();
     if (!name) continue;
     const normalizedName = name.toLocaleLowerCase("es");
@@ -155,35 +175,79 @@ export async function getErpSnapshot(date: string) {
       units: 0,
       records: 0,
       productKeys: new Set<string>(),
-      lastProductionAt: row.createdAt,
-      production: []
+      lastProductionAt: null,
+      lastActivityAt: row.occurredAt,
+      dispatchUnits: 0,
+      dispatchRecords: 0,
+      bagConsumptionUnits: 0,
+      bagConsumptionRecords: 0,
+      production: [],
+      activity: []
     };
-    current.units += row.quantity;
-    current.records += 1;
-    current.productKeys.add(`${row.productName}:${row.color ?? ""}`);
-    current.production.push({
+
+    if (row.reason === "PRODUCCION") {
+      current.units += row.quantity;
+      current.records += 1;
+      current.productKeys.add(`${row.productName}:${row.color ?? ""}`);
+      current.lastProductionAt ??= row.occurredAt;
+      current.production.push({
+        id: row.operationId,
+        productName: row.productName,
+        color: row.color,
+        quantity: row.quantity,
+        occurredAt: row.occurredAt
+      });
+    } else if (row.reason === "DESPACHO") {
+      current.dispatchUnits += row.quantity;
+      current.dispatchRecords += 1;
+    } else {
+      current.bagConsumptionUnits += row.quantity;
+      current.bagConsumptionRecords += 1;
+    }
+
+    current.activity.push({
       id: row.id,
+      operationId: row.operationId,
+      type: row.type,
+      reason: row.reason,
       productName: row.productName,
       color: row.color,
       quantity: row.quantity,
-      occurredAt: row.createdAt
+      occurredAt: row.occurredAt
     });
     operatorMap.set(normalizedName, current);
   }
 
   const operatorUnits = Array.from(operatorMap.values()).reduce((sumValue, item) => sumValue + item.units, 0);
   const operators = Array.from(operatorMap.values())
-    .map((item) => ({
-      name: item.name,
-      units: item.units,
-      records: item.records,
-      products: item.productKeys.size,
-      averagePerRecord: Math.round(item.units / item.records),
-      share: operatorUnits > 0 ? Math.round((item.units / operatorUnits) * 100) : 0,
-      lastProductionAt: item.lastProductionAt,
-      production: item.production
-    }))
-    .sort((a, b) => b.units - a.units || a.name.localeCompare(b.name, "es"));
+    .map((item) => {
+      const outputUnits = item.dispatchUnits + item.bagConsumptionUnits;
+      return {
+        name: item.name,
+        units: item.units,
+        records: item.records,
+        products: item.productKeys.size,
+        averagePerRecord: item.records > 0 ? Math.round(item.units / item.records) : 0,
+        share: operatorUnits > 0 ? Math.round((item.units / operatorUnits) * 100) : 0,
+        lastProductionAt: item.lastProductionAt,
+        lastActivityAt: item.lastActivityAt,
+        dispatchUnits: item.dispatchUnits,
+        dispatchRecords: item.dispatchRecords,
+        bagConsumptionUnits: item.bagConsumptionUnits,
+        bagConsumptionRecords: item.bagConsumptionRecords,
+        outputUnits,
+        balance: item.units - outputUnits,
+        production: item.production,
+        activity: item.activity
+      };
+    })
+    .sort((a, b) => b.units - a.units || b.outputUnits - a.outputUnits || a.name.localeCompare(b.name, "es"));
+
+  const registeredOperators = new Map<string, string>();
+  for (const row of registeredOperatorRows) {
+    const name = row.name?.trim();
+    if (name) registeredOperators.set(name.toLocaleLowerCase("es"), name);
+  }
 
   const items = inventoryRows.map(mapInventoryRow);
   const production = dayTotals.find((item) => item.kind === "PRODUCCION");
@@ -193,16 +257,17 @@ export async function getErpSnapshot(date: string) {
     date,
     inventory: items,
     movements: recentMovements,
-    registeredOperators: registeredOperatorRows
-      .map((row) => row.name?.trim())
-      .filter((name): name is string => Boolean(name))
-      .sort((a, b) => a.localeCompare(b, "es")),
+    registeredOperators: Array.from(registeredOperators.values()).sort((a, b) => a.localeCompare(b, "es")),
     operators,
     operatorDashboard: {
       activeCount: operators.length,
       totalUnits: operatorUnits,
+      totalDispatchUnits: operators.reduce((sumValue, item) => sumValue + item.dispatchUnits, 0),
+      totalBagConsumptionUnits: operators.reduce((sumValue, item) => sumValue + item.bagConsumptionUnits, 0),
+      totalOutputUnits: operators.reduce((sumValue, item) => sumValue + item.outputUnits, 0),
+      netBalance: operators.reduce((sumValue, item) => sumValue + item.balance, 0),
       averagePerOperator: operators.length > 0 ? Math.round(operatorUnits / operators.length) : 0,
-      bestOperator: operators[0]?.name ?? null
+      bestOperator: operators.find((item) => item.units > 0)?.name ?? null
     },
     dashboard: {
       totalStock: items.reduce((sumValue, item) => sumValue + item.stock, 0),
@@ -287,8 +352,11 @@ export async function createOperation(input: OperationInput) {
   if (input.quantity <= 0 || input.bagQuantity < 0) {
     throw new ErpBusinessError("INVALID_INPUT", "Las cantidades deben ser válidas.", 400);
   }
-  if (input.kind === "PRODUCCION" && !input.operator?.trim()) {
-    throw new ErpBusinessError("INVALID_INPUT", "El operario es obligatorio en producción.", 400);
+  if (!input.operator?.trim()) {
+    throw new ErpBusinessError("INVALID_INPUT", "El operario es obligatorio en toda operación.", 400);
+  }
+  if (input.kind === "DESPACHO" && input.bagQuantity !== 0) {
+    throw new ErpBusinessError("INVALID_INPUT", "El consumo de bolsas solo se registra desde producción.", 400);
   }
 
   return getDb().transaction(async (tx) => {

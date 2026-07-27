@@ -13,7 +13,7 @@ const OperationSchema = z.object({
   productId: z.string().trim().min(1),
   variantId: z.string().trim().min(1),
   quantity: z.number().int().positive(),
-  operator: z.string().trim().max(120).optional(),
+  operator: z.string().trim().min(1).max(120),
   bagQuantity: z.number().int().min(0).default(0),
   operationDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   notes: z.string().trim().max(500).optional()
