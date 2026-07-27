@@ -177,7 +177,48 @@ const Index = () => {
   const title = viewTitles[view];
 
   return (
-    <div className="erp-shell dark">
+    <div className="erp-shell dark black-console">
+      {/* @section: black-console-visuals */}
+      <style>{`
+        .erp-shell.black-console,
+        .erp-shell.black-console .erp-workspace {
+          background: #000;
+        }
+        .erp-shell.black-console .erp-workspace {
+          background-image:
+            linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px),
+            radial-gradient(circle at 90% 0%, rgba(37,112,255,.10), transparent 29rem),
+            radial-gradient(circle at 10% 100%, rgba(255,203,0,.055), transparent 24rem);
+          background-size: 32px 32px, 32px 32px, auto, auto;
+          background-attachment: fixed;
+        }
+        .erp-shell.black-console .sidebar,
+        .erp-shell.black-console .topbar {
+          background-color: rgba(0,0,0,.92);
+        }
+        .erp-shell.black-console .panel,
+        .erp-shell.black-console .metric-card,
+        .erp-shell.black-console .toolbar-panel,
+        .erp-shell.black-console .product-panel {
+          background: linear-gradient(145deg, rgba(18,22,29,.96), rgba(6,8,11,.97));
+        }
+        .system-status {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 166px;
+          padding: 8px 10px;
+          border: 1px solid rgba(255,203,0,.16);
+          border-radius: 10px;
+          color: #ffcb00;
+          background: rgba(255,203,0,.045);
+        }
+        .system-status > div { display: flex; flex-direction: column; }
+        .system-status span { color: #8c96a7; font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+        .system-status strong { margin-top: 2px; color: #e6ebf3; font-size: 9px; font-weight: 700; }
+        @media (max-width: 1120px) { .system-status { display: none; } }
+      `}</style>
       <a className="skip-link" href="#main-content">Saltar al contenido</a>
       <Sidebar view={view} onChange={setView} open={mobileNav} onClose={() => setMobileNav(false)} />
       <div className="erp-workspace">
@@ -205,6 +246,11 @@ const Index = () => {
             >
               <RefreshCw size={18} className={snapshotQuery.isFetching ? "spin" : ""} />
             </button>
+            {/* @section: inventory-protection-status */}
+            <div className="system-status" aria-label="Control de inventario protegido">
+              <ShieldCheck size={17} />
+              <div><span>Control activo</span><strong>Stock protegido</strong></div>
+            </div>
             <div className="live-pill"><span /> Sincronizado</div>
           </div>
         </header>
