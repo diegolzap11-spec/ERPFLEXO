@@ -1,6 +1,5 @@
 /* @section: google-workspace-sync-client */
 const GOOGLE_SYNC_WEB_APP_URL =
-  process.env.GOOGLE_SYNC_WEB_APP_URL?.trim() ||
   "https://script.google.com/macros/s/AKfycbyS7coLUMf_sLbecuWE2IMR4yluQunbpOcplBstj9LLsRCxDHW9JvhB8osp6dl_voWR3Q/exec";
 const GOOGLE_SYNC_TIMEOUT_MS = 25_000;
 
