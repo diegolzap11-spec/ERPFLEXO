@@ -44852,6 +44852,18 @@ emailVerificationRouter.post("/verify-code", protectedRoute, async (c) => {
 });
 var GOOGLE_SYNC_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyS7coLUMf_sLbecuWE2IMR4yluQunbpOcplBstj9LLsRCxDHW9JvhB8osp6dl_voWR3Q/exec";
 var GOOGLE_SYNC_TIMEOUT_MS = 25e3;
+async function fetchGoogleWorkspace(url$1, init) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), GOOGLE_SYNC_TIMEOUT_MS);
+	try {
+		return await fetch(url$1, {
+			...init,
+			signal: controller.signal
+		});
+	} finally {
+		clearTimeout(timeout);
+	}
+}
 function safeGoogleMessage(value) {
 	if (!value || typeof value !== "object") return null;
 	const envelope = value;
@@ -44875,10 +44887,9 @@ async function getGoogleSyncStatus() {
 		message: "Comprobación externa omitida de forma segura durante las pruebas."
 	};
 	try {
-		const response = await fetch(GOOGLE_SYNC_WEB_APP_URL, {
+		const response = await fetchGoogleWorkspace(GOOGLE_SYNC_WEB_APP_URL, {
 			method: "GET",
-			redirect: "follow",
-			signal: AbortSignal.timeout(GOOGLE_SYNC_TIMEOUT_MS)
+			redirect: "follow"
 		});
 		const upstream = safeGoogleMessage(await response.json().catch(() => null));
 		if (!response.ok || !upstream?.ok) return {
@@ -44915,15 +44926,14 @@ async function postSnapshotToGoogle(payload) {
 		message: "Sincronización externa omitida de forma segura durante las pruebas."
 	};
 	try {
-		const response = await fetch(GOOGLE_SYNC_WEB_APP_URL, {
+		const response = await fetchGoogleWorkspace(GOOGLE_SYNC_WEB_APP_URL, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
 				...payload,
 				secret
 			}),
-			redirect: "follow",
-			signal: AbortSignal.timeout(GOOGLE_SYNC_TIMEOUT_MS)
+			redirect: "follow"
 		});
 		const text$1 = await response.text();
 		let parsed = null;
