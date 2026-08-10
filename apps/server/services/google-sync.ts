@@ -57,7 +57,7 @@ export async function getGoogleSyncStatus(): Promise<GoogleSyncStatus> {
   }
 
   // Las pruebas no deben contactar los archivos reales de Google.
-  if (process.env.NODE_ENV === "test" && process.env.GOOGLE_SYNC_ALLOW_TEST !== "true") {
+  if (process.env.NODE_ENV === "test") {
     return {
       configured: true,
       reachable: true,
@@ -108,7 +108,7 @@ export async function postSnapshotToGoogle(payload: GoogleSyncPayload): Promise<
   }
 
   // Las pruebas nunca deben escribir en los archivos reales de Google.
-  if (process.env.NODE_ENV === "test" && process.env.GOOGLE_SYNC_ALLOW_TEST !== "true") {
+  if (process.env.NODE_ENV === "test") {
     return {
       ok: true,
       configured: true,
