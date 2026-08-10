@@ -3,12 +3,99 @@ const GOOGLE_SYNC_WEB_APP_URL =
   "https://script.google.com/macros/s/AKfycbyS7coLUMf_sLbecuWE2IMR4yluQunbpOcplBstj9LLsRCxDHW9JvhB8osp6dl_voWR3Q/exec";
 const GOOGLE_SYNC_TIMEOUT_MS = 25_000;
 
+/* @section: google-workspace-safe-diagnostics */
+export type GoogleSyncDiagnosticCode =
+  | "TIMEOUT"
+  | "DNS"
+  | "TLS"
+  | "CONNECTION"
+  | "NETWORK_POLICY"
+  | "REDIRECT"
+  | "FETCH_UNAVAILABLE"
+  | "FETCH_FAILED"
+  | "HTTP_ERROR"
+  | "INVALID_RESPONSE"
+  | "UPSTREAM_REJECTED"
+  | "UNKNOWN";
+
+function classifyGoogleConnectionError(error: unknown): GoogleSyncDiagnosticCode {
+  const codes: string[] = [];
+  const names: string[] = [];
+  const messages: string[] = [];
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 3 && current; depth += 1) {
+    if (current instanceof Error) {
+      names.push(current.name);
+      messages.push(current.message);
+    }
+    if (typeof current !== "object") break;
+    const record = current as Record<string, unknown>;
+    if (typeof record.code === "string") codes.push(record.code.toUpperCase());
+    current = record.cause;
+  }
+
+  const text = `${names.join(" ")} ${messages.join(" ")}`.toLowerCase();
+  const hasCode = (...expected: string[]) => expected.some((code) => codes.includes(code));
+
+  if (hasCode("ABORT_ERR") || text.includes("aborterror") || text.includes("aborted")) return "TIMEOUT";
+  if (hasCode("ENOTFOUND", "EAI_AGAIN", "ERR_DNS_NOT_FOUND") || text.includes("getaddrinfo")) return "DNS";
+  if (
+    codes.some((code) => code.startsWith("ERR_TLS_") || code.startsWith("CERT_") || code.includes("CERTIFICATE")) ||
+    hasCode("UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT") ||
+    text.includes("certificate") ||
+    text.includes("tls")
+  ) return "TLS";
+  if (hasCode("ERR_FR_TOO_MANY_REDIRECTS") || text.includes("redirect")) return "REDIRECT";
+  if (hasCode("EACCES", "EPERM", "ERR_ACCESS_DENIED") || text.includes("not allowed")) return "NETWORK_POLICY";
+  if (
+    hasCode(
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "ETIMEDOUT",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_SOCKET",
+      "UND_ERR_CONNECT"
+    )
+  ) return "CONNECTION";
+  if (text.includes("fetchunavailableerror") || text.includes("fetch is not defined") || text.includes("fetch is not a function")) {
+    return "FETCH_UNAVAILABLE";
+  }
+  if (text.includes("fetch failed") || text.includes("failed to fetch")) return "FETCH_FAILED";
+  return "UNKNOWN";
+}
+
+function diagnosticMessage(code: GoogleSyncDiagnosticCode) {
+  const labels: Record<GoogleSyncDiagnosticCode, string> = {
+    TIMEOUT: "tiempo de espera agotado",
+    DNS: "resolución DNS",
+    TLS: "negociación TLS",
+    CONNECTION: "conexión de red",
+    NETWORK_POLICY: "política de salida del servidor",
+    REDIRECT: "redirección HTTP",
+    FETCH_UNAVAILABLE: "cliente HTTP no disponible",
+    FETCH_FAILED: "solicitud HTTP rechazada por el runtime",
+    HTTP_ERROR: "respuesta HTTP de error",
+    INVALID_RESPONSE: "respuesta no válida",
+    UPSTREAM_REJECTED: "solicitud rechazada por Google",
+    UNKNOWN: "error de runtime no clasificado"
+  };
+  return labels[code];
+}
+
 /* @section: google-workspace-portable-timeout */
 async function fetchGoogleWorkspace(url: string, init: RequestInit) {
+  if (typeof globalThis.fetch !== "function") {
+    const error = new Error("HTTP client unavailable");
+    error.name = "FetchUnavailableError";
+    throw error;
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), GOOGLE_SYNC_TIMEOUT_MS);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await globalThis.fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timeout);
   }
@@ -19,6 +106,7 @@ export type GoogleSyncResult = {
   configured: boolean;
   skipped?: boolean;
   syncedAt?: string;
+  diagnosticCode?: GoogleSyncDiagnosticCode;
   message: string;
 };
 
@@ -26,6 +114,7 @@ export type GoogleSyncStatus = {
   configured: boolean;
   reachable: boolean;
   lastSyncAt?: string;
+  diagnosticCode?: GoogleSyncDiagnosticCode;
   message: string;
 };
 
@@ -80,12 +169,30 @@ export async function getGoogleSyncStatus(): Promise<GoogleSyncStatus> {
       method: "GET",
       redirect: "follow"
     });
-    const upstream = safeGoogleMessage(await response.json().catch(() => null));
-    if (!response.ok || !upstream?.ok) {
+    const parsed = await response.json().catch(() => null);
+    const upstream = safeGoogleMessage(parsed);
+    if (!response.ok) {
       return {
         configured: true,
         reachable: false,
-        message: "Google no está disponible en este momento."
+        diagnosticCode: "HTTP_ERROR",
+        message: "Google devolvió una respuesta HTTP de error (diagnóstico: HTTP_ERROR)."
+      };
+    }
+    if (!upstream) {
+      return {
+        configured: true,
+        reachable: false,
+        diagnosticCode: "INVALID_RESPONSE",
+        message: "Google devolvió una respuesta no válida (diagnóstico: INVALID_RESPONSE)."
+      };
+    }
+    if (!upstream.ok) {
+      return {
+        configured: true,
+        reachable: false,
+        diagnosticCode: "UPSTREAM_REJECTED",
+        message: "Google rechazó la comprobación de estado (diagnóstico: UPSTREAM_REJECTED)."
       };
     }
     return {
@@ -97,11 +204,12 @@ export async function getGoogleSyncStatus(): Promise<GoogleSyncStatus> {
         : "Apps Script responde, pero su configuración no está completa."
     };
   } catch (error) {
-    console.error("Google Workspace status request failed", error);
+    const diagnosticCode = classifyGoogleConnectionError(error);
     return {
       configured: true,
       reachable: false,
-      message: "Google no respondió a la comprobación de estado."
+      diagnosticCode,
+      message: `Google no respondió: ${diagnosticMessage(diagnosticCode)} (diagnóstico: ${diagnosticCode}).`
     };
   }
 }
@@ -142,15 +250,28 @@ export async function postSnapshotToGoogle(payload: GoogleSyncPayload): Promise<
     }
     const upstream = safeGoogleMessage(parsed);
 
-    if (!response.ok || !upstream?.ok) {
-      console.error("Google Workspace sync failed", {
-        status: response.status,
-        message: upstream?.errorMessage ?? "Respuesta no válida del servicio de Google."
-      });
+    if (!response.ok) {
       return {
         ok: false,
         configured: true,
-        message: "Google no pudo actualizarse; la operación del ERP permanece confirmada."
+        diagnosticCode: "HTTP_ERROR",
+        message: "Google devolvió un error HTTP; la operación del ERP permanece confirmada."
+      };
+    }
+    if (!upstream) {
+      return {
+        ok: false,
+        configured: true,
+        diagnosticCode: "INVALID_RESPONSE",
+        message: "Google devolvió una respuesta no válida; la operación del ERP permanece confirmada."
+      };
+    }
+    if (!upstream.ok) {
+      return {
+        ok: false,
+        configured: true,
+        diagnosticCode: "UPSTREAM_REJECTED",
+        message: "Google rechazó la sincronización; la operación del ERP permanece confirmada."
       };
     }
 
@@ -161,11 +282,12 @@ export async function postSnapshotToGoogle(payload: GoogleSyncPayload): Promise<
       message: "Google Sheets y Google Docs se actualizaron correctamente."
     };
   } catch (error) {
-    console.error("Google Workspace sync request failed", error);
+    const diagnosticCode = classifyGoogleConnectionError(error);
     return {
       ok: false,
       configured: true,
-      message: "Google no respondió; la operación del ERP permanece confirmada."
+      diagnosticCode,
+      message: `Google no respondió (${diagnosticMessage(diagnosticCode)}); la operación del ERP permanece confirmada.`
     };
   }
 }
