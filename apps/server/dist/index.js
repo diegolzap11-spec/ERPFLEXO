@@ -44850,6 +44850,115 @@ emailVerificationRouter.post("/verify-code", protectedRoute, async (c) => {
 	await getDb().delete(verification).where(eq(verification.identifier, identifier));
 	return c.json(apiSuccess({ verified: true }), 200);
 });
+var GOOGLE_SYNC_WEB_APP_URL = process.env.GOOGLE_SYNC_WEB_APP_URL?.trim() || "https://script.google.com/macros/s/AKfycbyS7coLUMf_sLbecuWE2IMR4yluQunbpOcplBstj9LLsRCxDHW9JvhB8osp6dl_voWR3Q/exec";
+var GOOGLE_SYNC_TIMEOUT_MS = 25e3;
+function safeGoogleMessage(value) {
+	if (!value || typeof value !== "object") return null;
+	const envelope = value;
+	return {
+		ok: envelope.ok === true,
+		configured: envelope.configured === true,
+		lastSyncAt: typeof envelope.lastSyncAt === "string" ? envelope.lastSyncAt : void 0,
+		syncedAt: envelope.data?.syncedAt,
+		errorMessage: envelope.error?.message
+	};
+}
+async function getGoogleSyncStatus() {
+	if (!process.env.GOOGLE_SYNC_SECRET?.trim() || !GOOGLE_SYNC_WEB_APP_URL) return {
+		configured: false,
+		reachable: false,
+		message: "La sincronización con Google no está configurada."
+	};
+	if (process.env.NODE_ENV === "test") return {
+		configured: true,
+		reachable: true,
+		message: "Comprobación externa omitida de forma segura durante las pruebas."
+	};
+	try {
+		const response = await fetch(GOOGLE_SYNC_WEB_APP_URL, {
+			method: "GET",
+			redirect: "follow",
+			signal: AbortSignal.timeout(GOOGLE_SYNC_TIMEOUT_MS)
+		});
+		const upstream = safeGoogleMessage(await response.json().catch(() => null));
+		if (!response.ok || !upstream?.ok) return {
+			configured: true,
+			reachable: false,
+			message: "Google no está disponible en este momento."
+		};
+		return {
+			configured: upstream.configured,
+			reachable: true,
+			lastSyncAt: upstream.lastSyncAt,
+			message: upstream.configured ? "Google Sheets y Google Docs están conectados." : "Apps Script responde, pero su configuración no está completa."
+		};
+	} catch (error$51) {
+		console.error("Google Workspace status request failed", error$51);
+		return {
+			configured: true,
+			reachable: false,
+			message: "Google no respondió a la comprobación de estado."
+		};
+	}
+}
+async function postSnapshotToGoogle(payload) {
+	const secret = process.env.GOOGLE_SYNC_SECRET?.trim();
+	if (!secret || !GOOGLE_SYNC_WEB_APP_URL) return {
+		ok: false,
+		configured: false,
+		message: "La sincronización con Google no está configurada."
+	};
+	if (process.env.NODE_ENV === "test") return {
+		ok: true,
+		configured: true,
+		skipped: true,
+		message: "Sincronización externa omitida de forma segura durante las pruebas."
+	};
+	try {
+		const response = await fetch(GOOGLE_SYNC_WEB_APP_URL, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				...payload,
+				secret
+			}),
+			redirect: "follow",
+			signal: AbortSignal.timeout(GOOGLE_SYNC_TIMEOUT_MS)
+		});
+		const text$1 = await response.text();
+		let parsed = null;
+		try {
+			parsed = JSON.parse(text$1);
+		} catch {
+			parsed = null;
+		}
+		const upstream = safeGoogleMessage(parsed);
+		if (!response.ok || !upstream?.ok) {
+			console.error("Google Workspace sync failed", {
+				status: response.status,
+				message: upstream?.errorMessage ?? "Respuesta no válida del servicio de Google."
+			});
+			return {
+				ok: false,
+				configured: true,
+				message: "Google no pudo actualizarse; la operación del ERP permanece confirmada."
+			};
+		}
+		return {
+			ok: true,
+			configured: true,
+			syncedAt: upstream.syncedAt ?? payload.syncedAt,
+			message: "Google Sheets y Google Docs se actualizaron correctamente."
+		};
+	} catch (error$51) {
+		console.error("Google Workspace sync request failed", error$51);
+		return {
+			ok: false,
+			configured: true,
+			message: "Google no respondió; la operación del ERP permanece confirmada."
+		};
+	}
+}
 var ErpBusinessError = class extends Error {
 	constructor(code, message$1, status) {
 		super(message$1);
@@ -45062,11 +45171,18 @@ async function applyStockMovement(tx, input) {
 		occurredAt: input.occurredAt
 	});
 }
+async function synchronizeErpSnapshot(date$4, sourceOperation = null) {
+	return postSnapshotToGoogle({
+		...await getErpSnapshot(date$4),
+		syncedAt: (/* @__PURE__ */ new Date()).toISOString(),
+		sourceOperation
+	});
+}
 async function createOperation(input) {
 	if (input.quantity <= 0 || input.bagQuantity < 0) throw new ErpBusinessError("INVALID_INPUT", "Las cantidades deben ser válidas.", 400);
 	if (!input.operator?.trim()) throw new ErpBusinessError("INVALID_INPUT", "El operario es obligatorio en toda operación.", 400);
 	if (input.kind === "DESPACHO" && input.bagQuantity !== 0) throw new ErpBusinessError("INVALID_INPUT", "El consumo de bolsas solo se registra desde producción.", 400);
-	return getDb().transaction(async (tx) => {
+	const committed = await getDb().transaction(async (tx) => {
 		const context = await getVariantContext(tx, input.productId, input.variantId);
 		if (!context) throw new ErpBusinessError("NOT_FOUND", "El producto o la variante no existe.", 404);
 		if (context.requiresColor && !context.color) throw new ErpBusinessError("INVALID_INPUT", "Debes seleccionar un color.", 400);
@@ -45112,12 +45228,31 @@ async function createOperation(input) {
 			occurredAt
 		};
 	});
+	let googleSync;
+	try {
+		googleSync = await synchronizeErpSnapshot(input.operationDate, {
+			operationId: committed.operationId,
+			kind: input.kind
+		});
+	} catch (error$51) {
+		console.error("Post-commit Google synchronization failed", error$51);
+		googleSync = {
+			ok: false,
+			configured: Boolean(process.env.GOOGLE_SYNC_SECRET?.trim()),
+			message: "La operación quedó confirmada, pero no se pudo preparar la actualización de Google."
+		};
+	}
+	return {
+		...committed,
+		googleSync
+	};
 }
 var erp_route_exports = /* @__PURE__ */ __export({
 	erpRouter: () => erpRouter,
 	isPublic: () => true
 }, 1);
 const erpRouter = new Hono();
+var BusinessDateSchema = string$2().regex(/^\d{4}-\d{2}-\d{2}$/);
 var OperationSchema = object$1({
 	kind: _enum(["PRODUCCION", "DESPACHO"]),
 	productId: string$2().trim().min(1),
@@ -45125,9 +45260,10 @@ var OperationSchema = object$1({
 	quantity: number$2().int().positive(),
 	operator: string$2().trim().min(1).max(120),
 	bagQuantity: number$2().int().min(0).default(0),
-	operationDate: string$2().regex(/^\d{4}-\d{2}-\d{2}$/),
+	operationDate: BusinessDateSchema,
 	notes: string$2().trim().max(500).optional()
 });
+var SyncSchema = object$1({ date: BusinessDateSchema });
 function errorResponse(c, error$51) {
 	if (error$51 instanceof ErpBusinessError) return c.json(apiFailure(error$51.code, error$51.message), error$51.status);
 	if (error$51 instanceof DatabaseError) {
@@ -45158,6 +45294,20 @@ var operationHandler = async (c) => {
 	}
 };
 erpRouter.post("/operations", publicRoute, operationHandler);
+erpRouter.get("/sync/status", publicRoute, async (c) => {
+	return c.json(apiSuccess(await getGoogleSyncStatus()), 200);
+});
+erpRouter.post("/sync", publicRoute, async (c) => {
+	const parsed = SyncSchema.safeParse(await c.req.json().catch(() => null));
+	if (!parsed.success) return c.json(apiFailure("INVALID_INPUT", "La fecha no es válida."), 400);
+	try {
+		const result = await synchronizeErpSnapshot(parsed.data.date);
+		if (!result.ok) return c.json(apiFailure("GOOGLE_SYNC_FAILED", result.message), result.configured ? 502 : 503);
+		return c.json(apiSuccess(result), 200);
+	} catch (error$51) {
+		return errorResponse(c, error$51);
+	}
+});
 var health_route_exports = /* @__PURE__ */ __export({
 	healthRouter: () => healthRouter,
 	isPublic: () => true
