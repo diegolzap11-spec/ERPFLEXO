@@ -44850,7 +44850,7 @@ emailVerificationRouter.post("/verify-code", protectedRoute, async (c) => {
 	await getDb().delete(verification).where(eq(verification.identifier, identifier));
 	return c.json(apiSuccess({ verified: true }), 200);
 });
-var GOOGLE_SYNC_WEB_APP_URL = process.env.GOOGLE_SYNC_WEB_APP_URL?.trim() || "https://script.google.com/macros/s/AKfycbyS7coLUMf_sLbecuWE2IMR4yluQunbpOcplBstj9LLsRCxDHW9JvhB8osp6dl_voWR3Q/exec";
+var GOOGLE_SYNC_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyS7coLUMf_sLbecuWE2IMR4yluQunbpOcplBstj9LLsRCxDHW9JvhB8osp6dl_voWR3Q/exec";
 var GOOGLE_SYNC_TIMEOUT_MS = 25e3;
 function safeGoogleMessage(value) {
 	if (!value || typeof value !== "object") return null;
@@ -44864,7 +44864,7 @@ function safeGoogleMessage(value) {
 	};
 }
 async function getGoogleSyncStatus() {
-	if (!process.env.GOOGLE_SYNC_SECRET?.trim() || !GOOGLE_SYNC_WEB_APP_URL) return {
+	if (!process.env.GOOGLE_SYNC_SECRET?.trim() || false) return {
 		configured: false,
 		reachable: false,
 		message: "La sincronización con Google no está configurada."
@@ -44903,7 +44903,7 @@ async function getGoogleSyncStatus() {
 }
 async function postSnapshotToGoogle(payload) {
 	const secret = process.env.GOOGLE_SYNC_SECRET?.trim();
-	if (!secret || !GOOGLE_SYNC_WEB_APP_URL) return {
+	if (!secret || false) return {
 		ok: false,
 		configured: false,
 		message: "La sincronización con Google no está configurada."
