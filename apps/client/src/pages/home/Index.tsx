@@ -20,6 +20,7 @@ import {
   Trophy,
   Truck,
   UserRound,
+  WifiOff,
   Users,
   X
 } from "lucide-react";
@@ -124,6 +125,21 @@ type ApiEnvelope<T> =
   | { ok: true; data: T }
   | { ok: false; error: { code: string; message: string } };
 
+type GoogleSyncResult = {
+  ok: boolean;
+  configured: boolean;
+  skipped?: boolean;
+  syncedAt?: string;
+  message: string;
+};
+
+type GoogleSyncStatus = {
+  configured: boolean;
+  reachable: boolean;
+  lastSyncAt?: string;
+  message: string;
+};
+
 const navigation: Array<{ id: View; label: string; icon: typeof CircleGauge }> = [
   { id: "dashboard", label: "Dashboard", icon: CircleGauge },
   { id: "inventory", label: "Inventario", icon: Boxes },
@@ -168,6 +184,30 @@ async function fetchSnapshot(date: string): Promise<Snapshot> {
   return payload.data;
 }
 
+/* @section: google-sync-client */
+async function fetchGoogleSyncStatus(): Promise<GoogleSyncStatus> {
+  const response = await apiFetch("/erp/sync/status", { auth: false });
+  const payload = (await response.json()) as ApiEnvelope<GoogleSyncStatus>;
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.ok ? "No se pudo comprobar Google." : payload.error.message);
+  }
+  return payload.data;
+}
+
+async function synchronizeGoogle(date: string): Promise<GoogleSyncResult> {
+  const response = await apiFetch("/erp/sync", {
+    method: "POST",
+    auth: false,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date })
+  });
+  const payload = (await response.json()) as ApiEnvelope<GoogleSyncResult>;
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.ok ? "No se pudo sincronizar Google." : payload.error.message);
+  }
+  return payload.data;
+}
+
 function stockStatus(item: InventoryItem) {
   if (item.stock === 0) return { label: "Sin stock", tone: "danger" };
   if (item.stock < item.minimumStock) return { label: "Stock bajo", tone: "warning" };
@@ -186,6 +226,24 @@ const Index = () => {
     refetchInterval: 15_000,
     staleTime: 5_000
   });
+  const googleStatusQuery = useQuery({
+    queryKey: ["google-sync-status"],
+    queryFn: fetchGoogleSyncStatus,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+    retry: 1
+  });
+  const googleSyncMutation = useMutation({
+    mutationFn: () => synchronizeGoogle(businessDate),
+    onSuccess: async (result) => {
+      toast.success(result.message);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["google-sync-status"] }),
+        queryClient.invalidateQueries({ queryKey: ["erp-snapshot"] })
+      ]);
+    },
+    onError: (error) => toast.error(error.message)
+  });
 
   useEffect(() => {
     setMobileNav(false);
@@ -193,6 +251,21 @@ const Index = () => {
 
   const data = snapshotQuery.data;
   const title = viewTitles[view];
+  const googleStatus = googleStatusQuery.data;
+  const googleTone = googleSyncMutation.isPending
+    ? "pending"
+    : googleStatus?.configured && googleStatus.reachable
+      ? "ready"
+      : "warning";
+  const googleLabel = googleSyncMutation.isPending
+    ? "Sincronizando…"
+    : googleStatus?.configured && googleStatus.reachable
+      ? googleStatus.lastSyncAt
+        ? `Actualizado ${formatDateTime(googleStatus.lastSyncAt)}`
+        : "Conectado"
+      : googleStatusQuery.isLoading
+        ? "Comprobando…"
+        : "Reintentar";
 
   return (
     <div className="erp-shell dark black-console">
@@ -235,7 +308,43 @@ const Index = () => {
         .system-status > div { display: flex; flex-direction: column; }
         .system-status span { color: #8c96a7; font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
         .system-status strong { margin-top: 2px; color: #e6ebf3; font-size: 9px; font-weight: 700; }
+        .google-sync-control {
+          display: flex;
+          min-width: 176px;
+          min-height: 40px;
+          align-items: center;
+          gap: 9px;
+          padding: 7px 10px;
+          border: 1px solid rgba(255,255,255,.10);
+          border-radius: 10px;
+          color: #8c96a7;
+          background: rgba(255,255,255,.025);
+          text-align: left;
+          transition: border-color .18s ease, background .18s ease, color .18s ease;
+        }
+        .google-sync-control > div { display: flex; min-width: 0; flex-direction: column; }
+        .google-sync-control span { color: #737e90; font-size: 7px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+        .google-sync-control strong { max-width: 148px; margin-top: 2px; overflow: hidden; color: #dbe2ec; font-size: 8px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+        .google-sync-control.ready { border-color: rgba(76,203,145,.22); color: #66d39c; background: rgba(48,159,111,.07); }
+        .google-sync-control.warning { border-color: rgba(235,177,75,.23); color: #e3b45e; background: rgba(194,134,31,.065); }
+        .google-sync-control.pending { border-color: rgba(79,143,255,.28); color: #70a4ff; background: rgba(54,119,239,.08); }
+        .google-sync-control:hover:not(:disabled) { border-color: rgba(90,150,255,.46); background: rgba(54,119,239,.12); }
+        .google-sync-control:disabled { cursor: wait; opacity: .8; }
         @media (max-width: 1120px) { .system-status { display: none; } }
+        @media (max-width: 820px) { .google-sync-control { min-width: 42px; width: 42px; justify-content: center; padding: 0; } .google-sync-control > div { display: none; } }
+        @media (max-width: 560px) { .google-sync-control { display: none; } }
+        /* @section: flexoimpress-brand-logo */
+        .brand-lockup .brand-identity img.brand-logo {
+          width: min(100%, 192px);
+          height: auto;
+          max-height: 76px;
+          object-fit: contain;
+          object-position: left center;
+          filter: drop-shadow(0 2px 6px rgba(0,0,0,.55));
+        }
+        @media (max-width: 720px) {
+          .brand-lockup .brand-identity img.brand-logo { width: 166px; max-height: 61px; }
+        }
       `}</style>
       <a className="skip-link" href="#main-content">Saltar al contenido</a>
       <Sidebar view={view} onChange={setView} open={mobileNav} onClose={() => setMobileNav(false)} />
@@ -269,7 +378,18 @@ const Index = () => {
               <ShieldCheck size={17} />
               <div><span>Control activo</span><strong>Stock protegido</strong></div>
             </div>
-            <div className="live-pill"><span /> Sincronizado</div>
+            {/* @section: google-sync-control */}
+            <button
+              className={`google-sync-control ${googleTone}`}
+              type="button"
+              onClick={() => googleSyncMutation.mutate()}
+              disabled={googleSyncMutation.isPending}
+              title={googleStatus?.message ?? "Sincronizar la instantánea actual con Google Sheets y Docs"}
+              aria-label="Sincronizar ahora con Google Sheets y Google Docs"
+            >
+              {googleSyncMutation.isPending ? <RefreshCw size={16} className="spin" /> : googleTone === "ready" ? <ShieldCheck size={16} /> : <WifiOff size={16} />}
+              <div><span>Google Workspace</span><strong>{googleLabel}</strong></div>
+            </button>
           </div>
         </header>
 
@@ -315,7 +435,7 @@ function Sidebar({
         {/* @section: flexoimpress-brand */}
         <div className="brand-lockup">
           <div className="brand-identity">
-            <img src="/brand/flexoimpress-logo-dark.png" alt="Flexoimpress" />
+            <img className="brand-logo" src="/brand/flexoimpress-logo-gold.png" alt="Flexoimpress — Seguridad, calidad y confianza" />
             <span>Control operativo ERP</span>
           </div>
           <button className="icon-button close-nav" type="button" aria-label="Cerrar menú" onClick={onClose}><X size={18} /></button>
@@ -613,19 +733,27 @@ function OperationForm({
           notes: notes || undefined
         })
       });
-      const payload = (await response.json()) as ApiEnvelope<{ operationId: string }>;
+      const payload = (await response.json()) as ApiEnvelope<{ operationId: string; googleSync: GoogleSyncResult }>;
       if (!response.ok || !payload.ok) {
         throw new Error(payload.ok ? "No se pudo registrar la operación." : payload.error.message);
       }
       return payload.data;
     },
-    onSuccess: async () => {
-      toast.success(kind === "PRODUCCION" ? "Producción registrada y stock actualizado." : "Despacho registrado y stock actualizado.");
+    onSuccess: async (result) => {
+      const operationMessage = kind === "PRODUCCION" ? "Producción registrada y stock actualizado." : "Despacho registrado y stock actualizado.";
+      if (result.googleSync.ok) {
+        toast.success(operationMessage, { description: result.googleSync.message });
+      } else {
+        toast.warning(operationMessage, { description: result.googleSync.message });
+      }
       setQuantity("");
       setBagQuantity("0");
       setNotes("");
       setOperator("");
-      await queryClient.invalidateQueries({ queryKey: ["erp-snapshot"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["erp-snapshot"] }),
+        queryClient.invalidateQueries({ queryKey: ["google-sync-status"] })
+      ]);
     },
     onError: (error) => toast.error(error.message)
   });

@@ -3,10 +3,13 @@ import { Context, Hono } from "hono";
 import { z } from "zod";
 import { DatabaseError } from "../_core/db";
 import { publicRoute } from "../_core/route-helpers";
-import { createOperation, ErpBusinessError, getErpSnapshot } from "../services/erp";
+import { createOperation, ErpBusinessError, getErpSnapshot, synchronizeErpSnapshot } from "../services/erp";
+import { getGoogleSyncStatus } from "../services/google-sync";
 
 export const isPublic = true;
 export const erpRouter = new Hono();
+
+const BusinessDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 const OperationSchema = z.object({
   kind: z.enum(["PRODUCCION", "DESPACHO"]),
@@ -15,8 +18,12 @@ const OperationSchema = z.object({
   quantity: z.number().int().positive(),
   operator: z.string().trim().min(1).max(120),
   bagQuantity: z.number().int().min(0).default(0),
-  operationDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  operationDate: BusinessDateSchema,
   notes: z.string().trim().max(500).optional()
+});
+
+const SyncSchema = z.object({
+  date: BusinessDateSchema
 });
 
 function errorResponse(c: Context, error: unknown) {
@@ -61,3 +68,25 @@ const operationHandler = async (c: Context) => {
 };
 
 erpRouter.post("/operations", publicRoute, operationHandler);
+
+/* @section: erp-google-sync-status */
+erpRouter.get("/sync/status", publicRoute, async (c) => {
+  return c.json(apiSuccess(await getGoogleSyncStatus()), 200);
+});
+
+/* @section: erp-google-manual-sync */
+erpRouter.post("/sync", publicRoute, async (c) => {
+  const parsed = SyncSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) {
+    return c.json(apiFailure("INVALID_INPUT", "La fecha no es válida."), 400);
+  }
+  try {
+    const result = await synchronizeErpSnapshot(parsed.data.date);
+    if (!result.ok) {
+      return c.json(apiFailure("GOOGLE_SYNC_FAILED", result.message), result.configured ? 502 : 503);
+    }
+    return c.json(apiSuccess(result), 200);
+  } catch (error) {
+    return errorResponse(c, error);
+  }
+});

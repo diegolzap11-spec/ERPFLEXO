@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "../_core/db";
 import { inventory, movements, operations, products, productVariants } from "../db/schema";
+import { postSnapshotToGoogle, type GoogleSyncResult } from "./google-sync";
 
 export type OperationKind = "PRODUCCION" | "DESPACHO";
 
@@ -347,6 +348,19 @@ async function applyStockMovement(
   });
 }
 
+/* @section: google-snapshot-synchronization */
+export async function synchronizeErpSnapshot(
+  date: string,
+  sourceOperation: { operationId: string; kind: OperationKind } | null = null
+): Promise<GoogleSyncResult> {
+  const snapshot = await getErpSnapshot(date);
+  return postSnapshotToGoogle({
+    ...snapshot,
+    syncedAt: new Date().toISOString(),
+    sourceOperation
+  });
+}
+
 /* @section: transactional-stock-operation */
 export async function createOperation(input: OperationInput) {
   if (input.quantity <= 0 || input.bagQuantity < 0) {
@@ -359,7 +373,7 @@ export async function createOperation(input: OperationInput) {
     throw new ErpBusinessError("INVALID_INPUT", "El consumo de bolsas solo se registra desde producción.", 400);
   }
 
-  return getDb().transaction(async (tx) => {
+  const committed = await getDb().transaction(async (tx) => {
     const context = await getVariantContext(tx, input.productId, input.variantId);
     if (!context) {
       throw new ErpBusinessError("NOT_FOUND", "El producto o la variante no existe.", 404);
@@ -417,4 +431,21 @@ export async function createOperation(input: OperationInput) {
 
     return { operationId, occurredAt };
   });
+
+  let googleSync: GoogleSyncResult;
+  try {
+    googleSync = await synchronizeErpSnapshot(input.operationDate, {
+      operationId: committed.operationId,
+      kind: input.kind
+    });
+  } catch (error) {
+    console.error("Post-commit Google synchronization failed", error);
+    googleSync = {
+      ok: false,
+      configured: Boolean(process.env.GOOGLE_SYNC_SECRET?.trim()),
+      message: "La operación quedó confirmada, pero no se pudo preparar la actualización de Google."
+    };
+  }
+
+  return { ...committed, googleSync };
 }

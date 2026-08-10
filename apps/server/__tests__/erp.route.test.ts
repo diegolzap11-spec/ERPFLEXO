@@ -219,4 +219,68 @@ describe("Flexoimpress ERP inventory transactions", () => {
       expect.objectContaining({ reason: "CONSUMO_BOLSA", quantity: 2, type: "SALIDA" })
     ]));
   });
+
+  /* @section: google-sync-isolation-tests */
+  it("keeps a committed operation when Google synchronization is not configured", async () => {
+    const previousSecret = process.env.GOOGLE_SYNC_SECRET;
+    delete process.env.GOOGLE_SYNC_SECRET;
+    try {
+      const response = await postOperation(production);
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as {
+        data?: { googleSync?: { ok: boolean; configured: boolean } };
+      };
+      expect(payload.data?.googleSync).toMatchObject({ ok: false, configured: false });
+
+      const state = await snapshot();
+      expect(state.data.inventory.find((row) => row.id === "var-mascarilla-as")?.stock).toBe(120);
+      expect(state.data.movements).toHaveLength(1);
+    } finally {
+      if (previousSecret === undefined) delete process.env.GOOGLE_SYNC_SECRET;
+      else process.env.GOOGLE_SYNC_SECRET = previousSecret;
+    }
+  });
+
+  it("manually synchronizes an unchanged snapshot without creating operations or movements", async () => {
+    const previousSecret = process.env.GOOGLE_SYNC_SECRET;
+    process.env.GOOGLE_SYNC_SECRET = "isolated-test-secret";
+    try {
+      const before = await snapshot();
+      const response = await app.fetch(
+        new Request("http://localhost/api/erp/sync", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ date: "2026-07-20" })
+        })
+      );
+      expect(response.status, await response.clone().text()).toBe(200);
+      const payload = (await response.json()) as {
+        data?: { ok: boolean; skipped?: boolean };
+      };
+      expect(payload.data).toMatchObject({ ok: true, skipped: true });
+
+      const after = await snapshot();
+      expect(after.data.inventory).toEqual(before.data.inventory);
+      expect(after.data.movements).toEqual(before.data.movements);
+    } finally {
+      if (previousSecret === undefined) delete process.env.GOOGLE_SYNC_SECRET;
+      else process.env.GOOGLE_SYNC_SECRET = previousSecret;
+    }
+  });
+
+  it("reports Google connection status without contacting external files during tests", async () => {
+    const previousSecret = process.env.GOOGLE_SYNC_SECRET;
+    process.env.GOOGLE_SYNC_SECRET = "isolated-test-secret";
+    try {
+      const response = await app.fetch(new Request("http://localhost/api/erp/sync/status"));
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as {
+        data?: { configured: boolean; reachable: boolean };
+      };
+      expect(payload.data).toMatchObject({ configured: true, reachable: true });
+    } finally {
+      if (previousSecret === undefined) delete process.env.GOOGLE_SYNC_SECRET;
+      else process.env.GOOGLE_SYNC_SECRET = previousSecret;
+    }
+  });
 });
