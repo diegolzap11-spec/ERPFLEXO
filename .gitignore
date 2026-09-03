@@ -44,6 +44,7 @@ coverage/
 # --- Build outputs / caches ---
 apps/client/dist/
 !apps/server/dist/
+apps/server/dist-vercel/
 dist-ssr/
 build/
 electron-dist/
