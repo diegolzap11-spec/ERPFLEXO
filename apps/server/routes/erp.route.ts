@@ -3,7 +3,7 @@ import { Context, Hono } from "hono";
 import { z } from "zod";
 import { DatabaseError } from "../_core/db";
 import { publicRoute } from "../_core/route-helpers";
-import { createOperation, ErpBusinessError, getErpSnapshot, synchronizeErpSnapshot } from "../services/erp";
+import { createDispatch, createOperation, ErpBusinessError, getErpSnapshot, synchronizeErpSnapshot } from "../services/erp";
 import { getGoogleSyncStatus } from "../services/google-sync";
 
 export const isPublic = true;
@@ -24,6 +24,22 @@ const OperationSchema = z.object({
 
 const SyncSchema = z.object({
   date: BusinessDateSchema
+});
+
+/* @section: multi-line-dispatch-schema */
+const DispatchLineSchema = z.object({
+  productId: z.string().trim().min(1),
+  variantId: z.string().trim().min(1),
+  quantity: z.number().int().positive()
+});
+
+const DispatchSchema = z.object({
+  ruc: z.string().trim().min(1),
+  businessName: z.string().trim().max(200).optional(),
+  operationDate: BusinessDateSchema,
+  operator: z.string().trim().min(1).max(120),
+  notes: z.string().trim().max(500).optional(),
+  items: z.array(DispatchLineSchema).min(1)
 });
 
 function errorResponse(c: Context, error: unknown) {
@@ -68,6 +84,22 @@ const operationHandler = async (c: Context) => {
 };
 
 erpRouter.post("/operations", publicRoute, operationHandler);
+
+/* @section: erp-public-dispatch */
+const dispatchHandler = async (c: Context) => {
+  const parsed = DispatchSchema.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) {
+    return c.json(apiFailure("INVALID_INPUT", "Completa correctamente todos los campos obligatorios del despacho."), 400);
+  }
+  try {
+    const result = await createDispatch(parsed.data);
+    return c.json(apiSuccess(result), 201);
+  } catch (error) {
+    return errorResponse(c, error);
+  }
+};
+
+erpRouter.post("/dispatches", publicRoute, dispatchHandler);
 
 /* @section: erp-google-sync-status */
 erpRouter.get("/sync/status", publicRoute, async (c) => {

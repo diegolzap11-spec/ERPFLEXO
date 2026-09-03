@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "erpflexo-client",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "client", "run", "dev"],
+      "port": 3100
+    }
+  ]
+}

@@ -1,7 +1,9 @@
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "../_core/db";
-import { inventory, movements, operations, products, productVariants } from "../db/schema";
+import { clients, dispatchOperations, dispatches, inventory, movements, operations, products, productVariants } from "../db/schema";
 import { postSnapshotToGoogle, type GoogleSyncResult } from "./google-sync";
+
+export const RUC_REGEX = /^\d{8,11}$/;
 
 export type OperationKind = "PRODUCCION" | "DESPACHO";
 
@@ -444,6 +446,140 @@ export async function createOperation(input: OperationInput) {
       ok: false,
       configured: Boolean(process.env.GOOGLE_SYNC_SECRET?.trim()),
       message: "La operación quedó confirmada, pero no se pudo preparar la actualización de Google."
+    };
+  }
+
+  return { ...committed, googleSync };
+}
+
+/* @section: multi-line-dispatch */
+export type DispatchLineInput = {
+  productId: string;
+  variantId: string;
+  quantity: number;
+};
+
+export type DispatchInput = {
+  ruc: string;
+  businessName?: string;
+  operationDate: string;
+  operator: string;
+  notes?: string;
+  items: DispatchLineInput[];
+};
+
+/* @section: transactional-multiline-dispatch */
+export async function createDispatch(input: DispatchInput) {
+  const ruc = input.ruc.trim();
+  const operator = input.operator.trim();
+  if (!RUC_REGEX.test(ruc)) {
+    throw new ErpBusinessError("INVALID_INPUT", "El RUC debe tener entre 8 y 11 dígitos.", 400);
+  }
+  if (!operator) {
+    throw new ErpBusinessError("INVALID_INPUT", "El operario responsable es obligatorio.", 400);
+  }
+  if (input.items.length === 0) {
+    throw new ErpBusinessError("INVALID_INPUT", "El despacho debe tener al menos un producto.", 400);
+  }
+  for (const item of input.items) {
+    if (!item.productId.trim() || !item.variantId.trim() || item.quantity <= 0) {
+      throw new ErpBusinessError("INVALID_INPUT", "Cada línea del despacho debe tener producto, variante y cantidad válidos.", 400);
+    }
+  }
+
+  const committed = await getDb().transaction(async (tx) => {
+    const existingClientRows = await tx.select().from(clients).where(eq(clients.ruc, ruc)).limit(1);
+    let clientId: string;
+    let businessName: string;
+
+    if (existingClientRows[0]) {
+      clientId = existingClientRows[0].id;
+      businessName = existingClientRows[0].businessName;
+    } else {
+      const providedName = input.businessName?.trim();
+      if (!providedName) {
+        throw new ErpBusinessError("INVALID_INPUT", "La razón social es obligatoria para un RUC nuevo.", 400);
+      }
+      clientId = crypto.randomUUID();
+      businessName = providedName;
+      const createdAt = new Date().toISOString();
+      await tx.insert(clients).values({
+        id: clientId,
+        ruc,
+        businessName,
+        createdAt,
+        updatedAt: createdAt
+      });
+    }
+
+    const dispatchId = crypto.randomUUID();
+    const dispatchCreatedAt = new Date().toISOString();
+    await tx.insert(dispatches).values({
+      id: dispatchId,
+      clientId,
+      operationDate: input.operationDate,
+      operator,
+      notes: input.notes?.trim() || null,
+      createdAt: dispatchCreatedAt
+    });
+
+    const operationIds: string[] = [];
+    for (const item of input.items) {
+      const context = await getVariantContext(tx, item.productId, item.variantId);
+      if (!context) {
+        throw new ErpBusinessError("NOT_FOUND", "Un producto o variante del despacho no existe.", 404);
+      }
+      if (context.requiresColor && !context.color) {
+        throw new ErpBusinessError("INVALID_INPUT", "Debes seleccionar un color para todos los productos que lo requieren.", 400);
+      }
+
+      const operationId = crypto.randomUUID();
+      const occurredAt = new Date().toISOString();
+      await tx.insert(operations).values({
+        id: operationId,
+        kind: "DESPACHO",
+        productId: item.productId,
+        variantId: item.variantId,
+        quantity: item.quantity,
+        operator,
+        bagQuantity: 0,
+        operationDate: input.operationDate,
+        notes: input.notes?.trim() || null,
+        createdAt: occurredAt
+      });
+
+      // Cada línea reconsulta el stock dentro de la misma transacción, así que
+      // líneas repetidas de la misma variante se validan de forma acumulada
+      // (dos líneas de 700 contra un stock de 1300 rechazan la segunda).
+      await applyStockMovement(tx, {
+        operationId,
+        variantId: item.variantId,
+        type: "SALIDA",
+        reason: "DESPACHO",
+        quantity: item.quantity,
+        occurredAt,
+        insufficientMessage: `Stock insuficiente para ${context.productName}${context.color ? ` ${context.color}` : ""}.`
+      });
+
+      await tx.insert(dispatchOperations).values({ operationId, dispatchId });
+      operationIds.push(operationId);
+    }
+
+    return { dispatchId, clientId, businessName, operationIds, occurredAt: dispatchCreatedAt };
+  });
+
+  let googleSync: GoogleSyncResult;
+  try {
+    googleSync = await synchronizeErpSnapshot(input.operationDate, {
+      operationId: committed.dispatchId,
+      kind: "DESPACHO"
+    });
+  } catch (error) {
+    console.error("Post-commit Google synchronization failed", error);
+    googleSync = {
+      ok: false,
+      configured: Boolean(process.env.GOOGLE_SYNC_SECRET?.trim()),
+      message: "El despacho quedó confirmado, pero no se pudo preparar la actualización de Google."
     };
   }
 

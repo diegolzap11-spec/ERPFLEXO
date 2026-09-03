@@ -12,6 +12,8 @@
 //      isDatabaseConfigured() returns false and every /api/auth/* request
 //      short-circuits with 503 DATABASE_UNCONFIGURED.
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { vi } from "vitest";
 
 vi.mock("@libsql/client/web", async () => {
@@ -21,7 +23,10 @@ vi.mock("@libsql/client/web", async () => {
 // Route auto-discovery can instantiate the DB module more than once under
 // Vitest. A process-scoped file lets every client in the same worker share the
 // exact database, unlike :memory: where each client receives an isolated DB.
-const TEST_DB_URL = `file:/tmp/flexoimpress-erp-test-${process.pid}.sqlite`;
+// Built from os.tmpdir() (not a hardcoded "/tmp") so this also works on
+// Windows dev machines, where "/tmp" isn't a real path.
+const TEST_DB_PATH = join(tmpdir(), `flexoimpress-erp-test-${process.pid}.sqlite`).replace(/\\/g, "/");
+const TEST_DB_URL = `file:${TEST_DB_PATH}`;
 
 // Use ??= so an external runner can override (e.g. point at a Docker
 // libsql-server for the Phase 0 local-vs-production comparison experiment).

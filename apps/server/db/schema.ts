@@ -193,6 +193,50 @@ export const movements = sqliteTable(
   ]
 );
 
+/* @section: client-dispatch-data-model */
+export const clients = sqliteTable(
+  "clients",
+  {
+    id: text("id").primaryKey(),
+    ruc: text("ruc").notNull(),
+    businessName: text("business_name").notNull(),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`)
+  },
+  (table) => [uniqueIndex("ux_clients_ruc").on(table.ruc)]
+);
+
+export const dispatches = sqliteTable(
+  "dispatches",
+  {
+    id: text("id").primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => clients.id),
+    operationDate: text("operation_date").notNull(),
+    operator: text("operator").notNull(),
+    notes: text("notes"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`)
+  },
+  (table) => [
+    index("idx_dispatches_client").on(table.clientId),
+    index("idx_dispatches_date").on(table.operationDate)
+  ]
+);
+
+export const dispatchOperations = sqliteTable(
+  "dispatch_operations",
+  {
+    operationId: text("operation_id")
+      .primaryKey()
+      .references(() => operations.id, { onDelete: "cascade" }),
+    dispatchId: text("dispatch_id")
+      .notNull()
+      .references(() => dispatches.id, { onDelete: "cascade" })
+  },
+  (table) => [index("idx_dispatch_operations_dispatch").on(table.dispatchId)]
+);
+
 export type Todo = typeof todos.$inferSelect;
 export type NewTodo = typeof todos.$inferInsert;
 export type StorageFile = typeof storageFiles.$inferSelect;

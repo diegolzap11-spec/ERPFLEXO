@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "LOVABLE_DEV_SERVER=true VITE_ENABLE_ROUTE_MESSAGING=true vite",
-    "build": "LOVABLE_DEV_SERVER=true VITE_ENABLE_ROUTE_MESSAGING=true vite build --mode development",
+    "dev": "cross-env LOVABLE_DEV_SERVER=true VITE_ENABLE_ROUTE_MESSAGING=true vite",
+    "build": "cross-env LOVABLE_DEV_SERVER=true VITE_ENABLE_ROUTE_MESSAGING=true vite build --mode development",
     "postbuild": "node scripts/postbuild.mjs",
     "lint": "eslint ."
   },
@@ -55,6 +55,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "4.7.0",
     "@vitejs/plugin-react-oxc": "^0.4.3",
+    "cross-env": "^7.0.3",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "@testing-library/react": "^16.1.0",
