@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "build:vercel": "cross-env SERVER_BUILD_TARGET=vercel vite build",
     "dev": "tsx _core/dev-server.ts",
     "dev:fc-entry": "tsx _core/fc-entry.ts",
     "lint": "eslint ."
@@ -23,6 +24,7 @@
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "@types/node": "^22.5.5",
+    "cross-env": "^7.0.3",
     "eslint": "^9.39.1",
     "globals": "^16.5.0",
     "tsx": "^4.19.1",
