@@ -35,7 +35,10 @@ let db: LibSQLDatabase<typeof schema> | null = null;
 type FetchInput = Parameters<typeof fetch>[0];
 
 export function isDatabaseConfigured() {
-  return Boolean(env.SKYBASE_DB_ENDPOINT && env.SKYBASE_DB_TOKEN && env.SKYBASE_DB_NAMESPACE);
+  // SKYBASE_DB_NAMESPACE is optional: createNamespaceFetch() below already
+  // omits the x-namespace header when it's empty, so only the endpoint and
+  // auth token are actually required to reach Skybase.
+  return Boolean(env.SKYBASE_DB_ENDPOINT && env.SKYBASE_DB_TOKEN);
 }
 
 function assertConfigured() {
