@@ -44,7 +44,10 @@ coverage/
 # --- Build outputs / caches ---
 apps/client/dist/
 !apps/server/dist/
-apps/server/dist-vercel/
+# dist-vercel/index.js is committed (like apps/server/dist/ above) so
+# api/index.ts always has something to import even before Vercel's own
+# Build Command re-runs `pnpm run build:vercel` and regenerates it fresh.
+!apps/server/dist-vercel/
 dist-ssr/
 build/
 electron-dist/
