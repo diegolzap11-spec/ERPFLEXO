@@ -38,6 +38,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 }) : target, mod));
 var __toCommonJS = (mod) => __hasOwnProp$2.call(mod, "module.exports") ? mod["module.exports"] : __copyProps$1(__defProp$2({}, "__esModule", { value: true }), mod);
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
+var handle = (app$1) => (req) => {
+	return app$1.fetch(req);
+};
 var compose = (middleware, onError$2, onNotFound) => {
 	return (context, next) => {
 		let index$1 = -1;
@@ -45729,5 +45732,5 @@ app.use("/api/*", withSession);
 for (const { path: path$1, router: router$1 } of routeEntries) app.route(path$1, router$1);
 app.onError(onError);
 app.notFound(notFound);
-var vercel_entry_default = app;
+var vercel_entry_default = handle(app);
 export { vercel_entry_default as default, logger as n, createAdapterFactory as t };
