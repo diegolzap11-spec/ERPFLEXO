@@ -24,11 +24,16 @@ const uploadHandler = async (c: Context) => {
     return c.json(apiFailure("INVALID_INPUT", "Expected multipart/form-data"), 400);
   }
 
+  // @ts-ignore — FormData.get() is a real, spec-compliant runtime method;
+  // Vercel's native Hono framework build resolves a stricter FormData type
+  // here than this repo's own tsc run does (confirmed live: TS2339 only
+  // there, not locally, with the same TypeScript version). No behavior change.
   const file = body.get("file");
   if (!(file instanceof File)) {
     return c.json(apiFailure("INVALID_INPUT", "File is required"), 400);
   }
 
+  // @ts-ignore — see the note above `body.get("file")`.
   const requestedPath = body.get("path");
   const relKey = typeof requestedPath === "string" && requestedPath.trim() ? requestedPath : file.name;
   const bytes = new Uint8Array(await file.arrayBuffer());
