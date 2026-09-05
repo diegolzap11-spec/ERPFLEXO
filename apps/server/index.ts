@@ -23,6 +23,10 @@ import "hono";
 // This file is intentionally left out of tsconfig.json's `include` — it
 // imports a build artifact that doesn't exist until the first build, so
 // there is nothing for tsc to check it against.
+// @ts-ignore — dist-vercel/index.js is a build artifact with no declaration
+// file; Vercel's native Hono framework build type-checks this entry file
+// with its own TypeScript pass (separate from tsconfig.json, which doesn't
+// include this file — see the note above).
 import app from "./dist-vercel/index.js";
 
 export default app;
