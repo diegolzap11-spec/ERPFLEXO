@@ -1,11 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "hono",
   "buildCommand": "pnpm --filter server run build:vercel",
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api" }
-  ],
   "functions": {
-    "api/index.ts": {
+    "index.ts": {
       "maxDuration": 30
     }
   }
