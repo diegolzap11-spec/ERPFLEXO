@@ -25,4 +25,15 @@ import handler from "../dist-vercel/index.js";
 
 export const config = { runtime: "nodejs" };
 
-export default handler;
+// IMPORTANT: on the Node.js runtime, Vercel calls a `default` export with the
+// legacy (req, res) Node http signature, silently ignoring anything it
+// returns — confirmed live via `vercel logs`, which showed every request
+// timing out after 30s with "default export returned a `Response`... You
+// likely meant the Web fetch-style API. Fix: export a `fetch` function."
+// A named `fetch` export is Vercel's documented opt-in for the Web-standard
+// (req: Request) => Response signature on the Node.js runtime (Edge
+// functions get this for free via `default`, but better-auth needs
+// node:crypto's scrypt/randomBytes, which Edge doesn't provide).
+export function fetch(request: Request) {
+  return handler(request);
+}
